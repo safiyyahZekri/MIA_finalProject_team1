@@ -5,6 +5,7 @@ from typing import List,Union,Literal
 from pydantic import BaseModel
 import numpy as np
 import pymupdf
+import torch
 
 class Word(BaseModel):
     word_list:List[str]
@@ -60,7 +61,10 @@ class PDF_to_Image():
 
 class OCR_Model():
     def __init__(self):
+        self.device=torch.device('cuda' if torch.cuda().is_available() else 'cpu')
+
         self.model=ocr_predictor(pretrained=True,detect_tables=True,detect_layout=True)
+        self.model=self.model.to(device)
     def __call__(self,pdf_to_image):
         return self.model(pdf_to_image)
 
