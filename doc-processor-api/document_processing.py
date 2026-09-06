@@ -48,7 +48,7 @@ class DocumentJSON(BaseModel):
 class PDF_to_Image():
     def convert(self,pdf_path):
         images=[]
-        image=pymupdf.open(pdf_path,filetype="pdf")
+        image=pymupdf.open(stream=pdf_path,filetype="pdf")
         page_count=image.page_count
         for page in range(page_count):
             image_bytes=image[page].get_pixmap(matrix=pymupdf.Matrix(2,2),alpha=False,colorspace=pymupdf.csRGB)
@@ -146,5 +146,3 @@ def JSON_Processing(output,pdf_to_image):
         pages_list.append(page_block)
                         
     return DocumentJSON(pages=pages_list,document_id=str(uuid.uuid4()))
-                
-

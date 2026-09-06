@@ -1,8 +1,6 @@
 from document_processing import JSON_Processing,PDF_to_Image,OCR_Model
 from fastapi import FastAPI,File,UploadFile,HTTPException
 app=FastAPI()
-
-
 model=OCR_Model()
 @app.get("/")
 def status():

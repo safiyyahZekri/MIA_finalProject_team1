@@ -21,7 +21,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY main.py .
 COPY document_processing.py .
 
-RUN python3 -c "from doctr.models import ocr_predictor; ocr_predictor(pretrained=True)"
+
 
 EXPOSE 8000
 
