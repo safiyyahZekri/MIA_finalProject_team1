@@ -74,6 +74,8 @@ def trace_get(trace_id: str):
     trace = tracing.get_trace(trace_id)
     if trace is None:
         raise HTTPException(status_code=404, detail="trace not found")
+    trace = dict(trace)
+    trace["trace_url"] = tracing.get_trace_url(trace_id)
     return trace
 
 
@@ -88,8 +90,9 @@ class BenchmarkRunRequest(BaseModel):
     validator_url: Optional[str] = None
     answer_key: Optional[str] = None
     retrieval_k: int = 5
-    gold_field: str = "answer"
-    relevant_docs_field: str = "relevant_document_ids"
+    question_field: str = "question_text"
+    gold_field: str = "ground_truth_answer"
+    scale_field: str = "scale"
 
 
 @app.post("/benchmark/run")
@@ -100,8 +103,9 @@ def benchmark_run(req: BenchmarkRunRequest):
         validator_url=req.validator_url,
         answer_key=req.answer_key,
         retrieval_k=req.retrieval_k,
+        question_field=req.question_field,
         gold_field=req.gold_field,
-        relevant_docs_field=req.relevant_docs_field,
+        scale_field=req.scale_field,
     )
     report = run_benchmark(config)
     return {"run_id": report["run_id"], "summary": report["summary"]}
@@ -113,8 +117,9 @@ async def benchmark_run_from_file(
     validator_url: Optional[str] = Form(None),
     answer_key: Optional[str] = Form(None),
     retrieval_k: int = Form(5),
-    gold_field: str = Form("answer"),
-    relevant_docs_field: str = Form("relevant_document_ids"),
+    question_field: str = Form("question_text"),
+    gold_field: str = Form("ground_truth_answer"),
+    scale_field: str = Form("scale"),
     file: UploadFile = File(...),
 ):
     """Convenience endpoint: upload the 100-question practice set (JSON
@@ -131,8 +136,9 @@ async def benchmark_run_from_file(
         validator_url=validator_url,
         answer_key=answer_key,
         retrieval_k=retrieval_k,
+        question_field=question_field,
         gold_field=gold_field,
-        relevant_docs_field=relevant_docs_field,
+        scale_field=scale_field,
     )
     report = run_benchmark(config)
     return {"run_id": report["run_id"], "summary": report["summary"]}

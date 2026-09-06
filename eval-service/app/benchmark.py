@@ -3,9 +3,9 @@ Automated benchmark harness (spec: "a held-out subset must be used to
 automatically score the complete system end to end: question -> your system
 -> predicted answer -> compare to ground truth -> metrics").
 
-Input format: the practice-question record schema (confirmed against the
-actual `questions_setA_practice.json` + `record_schema_guide_ar.md` files),
-NOT the generic TAT-DQA shape. Each record looks like:
+Input format: the practice-question record schema (confirmed against
+`questions_setA_practice.json` + `record_schema_guide_ar.md`), NOT the
+generic TAT-DQA shape. Each record looks like:
 
     {
       "question_id": "A001",
@@ -26,21 +26,48 @@ relevant document ids for retrieval metrics is derived from
 the single-document scoping id (when the question has one) is
 `source_doc_uid`, which is `null` for multi-document/derived questions.
 
-The harness calls a configurable `system_url` (e.g. orchestrator-api's
-`/ask`) with `{"question": ..., "document_id": ...}` and expects back a
-JSON body that is (or contains, via `answer_key`) a Strict-Answer-Schema
-object: `{"answer_type", "evidence", "params"}`. It then:
+Confirmed system contract: `system_url` should point at agent-service's
+`POST /answer` endpoint, built specifically for eval-service's use. It takes
+`{"question": ..., "document_id": ...}` and returns the same three
+Strict-Answer-Schema fields (`answer_type`, `evidence`, `params`) plus two
+additional sibling fields, `trace` and `question_type`:
 
-  1. Times the round trip (system latency).
-  2. Sends the predicted answer to answer-validator-api to confirm schema
-     validity (this is the natural place to check it, since eval-service
-     already owns the pass/fail bookkeeping).
-  3. Scores EM / F1 / numerical accuracy against the gold answer.
-  4. If both predicted evidence document_ids and gold
-     `relevant_document_ids` are available, scores Recall@K / Precision@K /
-     Hit Rate / MRR.
-  5. Aggregates everything, including latency / llm_calls / tokens / cost if
-     the system response includes those optional fields.
+    {
+      "answer_type": "...", "evidence": [...], "params": {...},
+      "trace": <opaque, shape not specified by agent-service>,
+      "question_type": "..."
+    }
+
+`trace`'s internal shape is not part of any confirmed contract, so it is
+treated as opaque, best-effort metadata: read verbatim if present, stored
+alongside the result, never required and never validated. It is also never
+forwarded to answer-validator-api, since that endpoint's schema forbids
+unknown keys — only the bare `{answer_type, evidence, params}` object is
+sent there. If a system instead nests the answer under a wrapper key,
+`answer_key` can still be used to dig it out.
+
+Independent of whatever agent-service reports, this harness opens its own
+Langfuse trace for every question (via app.tracing) so every benchmarked
+question is diagnosable from eval-service's own records regardless of
+whether agent-service's tracing is wired up. Each result carries an
+eval-service `trace_id` plus, separately and clearly labeled, whatever
+`trace` payload the system under test returned.
+
+For each question the harness:
+  1. Opens an eval-service trace and times the round trip.
+  2. Extracts the core answer object and, if present, the optional
+     `trace` / `question_type` fields.
+  3. Sends the core answer object to answer-validator-api to confirm schema
+     validity.
+  4. Scores EM / F1 / numerical accuracy against the gold answer (with
+     scale normalization), or, for `unanswerable` gold questions, whether
+     the system correctly abstained.
+  5. If gold evidence document ids are available, scores Recall@K /
+     Precision@K / Hit Rate / MRR against the predicted evidence.
+  6. Logs question, response, and scoring outcome as trace steps, then
+     closes the trace.
+  7. Aggregates everything, including a short list of failed examples with
+     their trace_id, for failure-analysis follow-up.
 """
 from __future__ import annotations
 
@@ -54,9 +81,12 @@ from typing import Any, Dict, List, Optional
 import httpx
 
 from . import metrics as m
+from . import tracing
 
 RESULTS_DIR = Path(__file__).resolve().parent.parent / "results"
 RESULTS_DIR.mkdir(exist_ok=True)
+
+_CORE_ANSWER_KEYS = ("answer_type", "evidence", "params")
 
 
 def _extract_answer_value(answer: dict):
@@ -75,16 +105,6 @@ def _extract_retrieved_doc_ids(answer: dict) -> List[str]:
     return [e.get("document_id") for e in evidence if isinstance(e, dict) and e.get("document_id")]
 
 
-_SCALE_MULTIPLIER = {
-    "": 1,
-    "thousand": 1_000,
-    "million": 1_000_000,
-    "billion": 1_000_000_000,
-    # "percent" is intentionally excluded — a percent scale means the raw
-    # number IS the percentage value, not a multiplier on it.
-}
-
-
 def _extract_relevant_doc_ids(record: dict) -> List[str]:
     """The real schema has no flat `relevant_document_ids` field — the gold
     document ids live inside `gold_evidence[*].source_doc_uid`."""
@@ -100,12 +120,50 @@ def _extract_scoping_doc_id(record: dict) -> Optional[str]:
     return record.get("source_doc_uid")
 
 
+def _dig(payload: dict, dotted_key: Optional[str]) -> dict:
+    if not dotted_key:
+        return payload
+    node = payload
+    for part in dotted_key.split("."):
+        node = node.get(part, {}) if isinstance(node, dict) else {}
+    return node
+
+
+def _split_core_answer_and_metadata(body: Any, answer_key: Optional[str]):
+    """Given a raw system response, return (core_answer, system_trace,
+    question_type).
+
+    `core_answer` is the bare `{answer_type, evidence, params}` object,
+    stripped of any sibling fields (like agent-service's `trace` /
+    `question_type`) so it is safe to forward to answer-validator-api,
+    which rejects unknown top-level keys. If `answer_key` is set, the
+    answer is dug out from that nested path first (metadata is then read
+    from the top-level body, not from inside the nested object, matching
+    the confirmed agent-service shape where trace/question_type are
+    siblings of the answer fields, not nested inside them).
+    """
+    if not isinstance(body, dict):
+        return None, None, None
+
+    nested = _dig(body, answer_key)
+    if not isinstance(nested, dict) or "answer_type" not in nested:
+        return None, body.get("trace"), body.get("question_type")
+
+    core_answer = {k: nested[k] for k in _CORE_ANSWER_KEYS if k in nested}
+
+    system_trace = body.get("trace") if not answer_key else nested.get("trace", body.get("trace"))
+    question_type = body.get("question_type") if not answer_key else nested.get(
+        "question_type", body.get("question_type")
+    )
+    return core_answer, system_trace, question_type
+
+
 @dataclass
 class BenchmarkConfig:
     system_url: str
     questions: List[dict]
     validator_url: Optional[str] = None
-    answer_key: Optional[str] = None  # dotted path if the answer is nested, e.g. "answer"
+    answer_key: Optional[str] = None  # dotted path if the answer is nested
     retrieval_k: int = 5
     timeout_s: float = 60.0
     # Field names matching the confirmed practice-question record schema.
@@ -127,17 +185,21 @@ class QuestionResult:
     latency_ms: float
     schema_valid: Optional[bool]
     validator_reason: Optional[str]
+    trace_id: Optional[str] = None
+    system_trace: Optional[Any] = None
+    question_type: Optional[str] = None
     error: Optional[str] = None
     extra_perf: dict = field(default_factory=dict)
 
-
-def _dig(payload: dict, dotted_key: Optional[str]) -> dict:
-    if not dotted_key:
-        return payload
-    node = payload
-    for part in dotted_key.split("."):
-        node = node.get(part, {})
-    return node
+    @property
+    def is_failure(self) -> bool:
+        if self.error:
+            return True
+        if self.schema_valid is False:
+            return True
+        if self.exact_match is not None and self.exact_match < 1.0:
+            return True
+        return False
 
 
 def run_benchmark(config: BenchmarkConfig) -> dict:
@@ -153,24 +215,40 @@ def run_benchmark(config: BenchmarkConfig) -> dict:
             relevant_docs = _extract_relevant_doc_ids(q)
             scoping_doc_id = _extract_scoping_doc_id(q)
 
+            trace_id = tracing.start_trace(
+                name=f"benchmark:{qid}",
+                metadata={"question_id": qid, "question_text": question_text, "run_id": run_id},
+            )
+
             start = time.perf_counter()
             error = None
             answer_obj: Optional[dict] = None
+            system_trace = None
+            question_type = None
             perf_extra: dict = {}
+            request_payload = {"question": question_text, "document_id": scoping_doc_id}
             try:
-                resp = client.post(
-                    config.system_url,
-                    json={"question": question_text, "document_id": scoping_doc_id},
-                )
+                resp = client.post(config.system_url, json=request_payload)
                 resp.raise_for_status()
                 body = resp.json()
-                answer_obj = _dig(body, config.answer_key)
-                for perf_field in ("llm_calls", "tokens_used", "cost_usd"):
-                    if isinstance(body, dict) and perf_field in body:
-                        perf_extra[perf_field] = body[perf_field]
+                answer_obj, system_trace, question_type = _split_core_answer_and_metadata(
+                    body, config.answer_key
+                )
+                if isinstance(body, dict):
+                    for perf_field in ("llm_calls", "tokens_used", "cost_usd"):
+                        if perf_field in body:
+                            perf_extra[perf_field] = body[perf_field]
             except Exception as exc:  # network error, bad JSON, non-2xx, etc.
                 error = str(exc)
             latency_ms = (time.perf_counter() - start) * 1000
+
+            tracing.log_step(
+                trace_id,
+                "call_system",
+                input=request_payload,
+                output=answer_obj if answer_obj is not None else {"error": error},
+                latency_ms=latency_ms,
+            )
 
             schema_valid = None
             validator_reason = None
@@ -183,6 +261,12 @@ def run_benchmark(config: BenchmarkConfig) -> dict:
                 except Exception as exc:
                     schema_valid = False
                     validator_reason = f"validator call failed: {exc}"
+                tracing.log_step(
+                    trace_id,
+                    "validate_schema",
+                    input=answer_obj,
+                    output={"valid": schema_valid, "reason": validator_reason},
+                )
 
             em = f1 = num_acc = None
             retrieval_scores = None
@@ -210,6 +294,19 @@ def run_benchmark(config: BenchmarkConfig) -> dict:
                     "reciprocal_rank": m.reciprocal_rank(retrieved_ids, relevant_docs),
                 }
 
+            tracing.log_step(
+                trace_id,
+                "score",
+                input={"gold": gold, "gold_scale": gold_scale},
+                output={
+                    "exact_match": em,
+                    "f1": f1,
+                    "numerical_accuracy": num_acc,
+                    "retrieval": retrieval_scores,
+                },
+            )
+            tracing.end_trace(trace_id, output={"exact_match": em, "schema_valid": schema_valid})
+
             results.append(
                 QuestionResult(
                     question_id=qid,
@@ -223,6 +320,9 @@ def run_benchmark(config: BenchmarkConfig) -> dict:
                     latency_ms=latency_ms,
                     schema_valid=schema_valid,
                     validator_reason=validator_reason,
+                    trace_id=trace_id,
+                    system_trace=system_trace,
+                    question_type=question_type,
                     error=error,
                     extra_perf=perf_extra,
                 )
@@ -255,6 +355,17 @@ def _summarize(results: List[QuestionResult]) -> dict:
     perf_tokens = [r.extra_perf.get("tokens_used") for r in results if "tokens_used" in r.extra_perf]
     perf_cost = [r.extra_perf.get("cost_usd") for r in results if "cost_usd" in r.extra_perf]
 
+    failed = [r for r in results if r.is_failure]
+    failed_examples = [
+        {
+            "question_id": r.question_id,
+            "trace_id": r.trace_id,
+            "trace_url": tracing.get_trace_url(r.trace_id) if r.trace_id else None,
+            "reason": r.error or r.validator_reason or "exact_match miss",
+        }
+        for r in failed[:5]
+    ]
+
     return {
         "num_questions": n,
         "num_errors": n_errors,
@@ -271,6 +382,8 @@ def _summarize(results: List[QuestionResult]) -> dict:
         "avg_llm_calls": m.mean(perf_llm_calls),
         "avg_tokens_used": m.mean(perf_tokens),
         "avg_cost_usd": m.mean(perf_cost),
+        "num_failed_examples": len(failed),
+        "failed_examples": failed_examples,
     }
 
 

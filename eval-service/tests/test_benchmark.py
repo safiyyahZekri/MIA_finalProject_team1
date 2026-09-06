@@ -4,10 +4,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from app import tracing  # noqa: E402
 from app.benchmark import (  # noqa: E402
     BenchmarkConfig,
     _extract_relevant_doc_ids,
     _extract_scoping_doc_id,
+    _split_core_answer_and_metadata,
     run_benchmark,
 )
 
@@ -192,3 +194,153 @@ def test_benchmark_runs_against_real_practice_file(monkeypatch):
     # names are actually being read correctly.
     assert summary["exact_match"] == 1.0
     assert summary["retrieval_recall_at_k"] == 1.0
+
+
+# ---------------------------------------------------------------------------
+# Confirmed agent-service /answer contract: trace + question_type are
+# optional sibling fields, read if present, never required, never forwarded
+# to answer-validator-api (whose schema forbids unknown top-level keys).
+# ---------------------------------------------------------------------------
+
+
+def test_split_core_answer_strips_trace_and_question_type():
+    body = {
+        "answer_type": "direct",
+        "evidence": [{"document_id": "doc_017", "page": 1}],
+        "params": {"value": "$142.5M"},
+        "trace": {"anything": "agent-service decides this shape, not us"},
+        "question_type": "financial_lookup",
+    }
+    core, system_trace, question_type = _split_core_answer_and_metadata(body, answer_key=None)
+    assert core == {
+        "answer_type": "direct",
+        "evidence": [{"document_id": "doc_017", "page": 1}],
+        "params": {"value": "$142.5M"},
+    }
+    assert system_trace == {"anything": "agent-service decides this shape, not us"}
+    assert question_type == "financial_lookup"
+
+
+def test_split_core_answer_handles_missing_trace_and_question_type():
+    body = {
+        "answer_type": "insufficient_evidence",
+        "evidence": [],
+        "params": {"reason": "n/a"},
+    }
+    core, system_trace, question_type = _split_core_answer_and_metadata(body, answer_key=None)
+    assert core == body
+    assert system_trace is None
+    assert question_type is None
+
+
+class ContractFakeClient:
+    """Mimics the confirmed agent-service /answer contract: the answer
+    object plus sibling trace/question_type fields, at the top level."""
+
+    def __init__(self, *a, **kw):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def post(self, url, json=None):
+        if url == "http://fake-agent/answer":
+            return FakeResponse(
+                {
+                    "answer_type": "direct",
+                    "evidence": [{"document_id": "doc_017", "page": 1}],
+                    "params": {"value": "$142.5M"},
+                    "trace": {"steps": ["classify", "retrieve", "generate"]},
+                    "question_type": "financial_lookup",
+                }
+            )
+        if url == "http://fake-validator/validate_answer":
+            ContractFakeClient.last_validator_payload = json
+            return FakeResponse({"valid": True, "reason": None})
+        raise AssertionError(f"unexpected URL {url}")
+
+
+def test_benchmark_stores_system_trace_and_strips_it_before_validation(monkeypatch):
+    import app.benchmark as bench_module
+
+    monkeypatch.setattr(bench_module.httpx, "Client", ContractFakeClient)
+
+    questions = [
+        {
+            "question_id": "q1",
+            "question_text": "What was the operating income reported in 2020?",
+            "ground_truth_answer": "$142.5M",
+            "source_doc_uid": "doc_017",
+            "gold_evidence": [{"source_doc_uid": "doc_017"}],
+        }
+    ]
+    config = BenchmarkConfig(
+        system_url="http://fake-agent/answer",
+        questions=questions,
+        validator_url="http://fake-validator/validate_answer",
+    )
+    report = run_benchmark(config)
+    result = report["results"][0]
+
+    assert result["system_trace"] == {"steps": ["classify", "retrieve", "generate"]}
+    assert result["question_type"] == "financial_lookup"
+    assert result["schema_valid"] is True
+    # The validator must only ever see the bare three-key answer object.
+    assert set(ContractFakeClient.last_validator_payload.keys()) == {
+        "answer_type",
+        "evidence",
+        "params",
+    }
+
+
+# ---------------------------------------------------------------------------
+# eval-service's own trace_id must be independent of upstream tracing and
+# must resolve to an actual (local-fallback-acceptable) trace.
+# ---------------------------------------------------------------------------
+
+
+def test_every_result_has_a_resolvable_trace_id(monkeypatch):
+    import app.benchmark as bench_module
+
+    monkeypatch.setattr(bench_module.httpx, "Client", FakeClient)
+
+    questions = _load_real_questions()[:10]  # a subset, per the verification requirement
+    config = BenchmarkConfig(system_url="http://fake-system/ask", questions=questions)
+    report = run_benchmark(config)
+
+    assert len(report["results"]) == 10
+    for result in report["results"]:
+        trace_id = result["trace_id"]
+        assert trace_id, "every benchmarked question must carry a trace_id"
+        trace = tracing.get_trace(trace_id)
+        assert trace is not None, f"trace_id {trace_id} did not resolve to an actual trace"
+        step_names = [s["name"] for s in trace["steps"]]
+        assert "call_system" in step_names
+        assert "score" in step_names
+        assert "output" in trace  # set by end_trace
+
+
+def test_failed_examples_reference_resolvable_traces(monkeypatch):
+    import app.benchmark as bench_module
+
+    monkeypatch.setattr(bench_module.httpx, "Client", FakeClient)
+
+    questions = [
+        {
+            "question_id": "q_wrong",
+            "question_text": "What were the restructuring expenses?",  # -> insufficient_evidence
+            "ground_truth_answer": "$5.0M",  # wrong on purpose: forces an EM miss
+            "gold_evidence": [],
+        }
+    ]
+    config = BenchmarkConfig(system_url="http://fake-system/ask", questions=questions)
+    report = run_benchmark(config)
+
+    failed = report["summary"]["failed_examples"]
+    assert report["summary"]["num_failed_examples"] == 1
+    assert len(failed) == 1
+    assert failed[0]["question_id"] == "q_wrong"
+    assert tracing.get_trace(failed[0]["trace_id"]) is not None

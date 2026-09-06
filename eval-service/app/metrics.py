@@ -147,7 +147,12 @@ def numerical_accuracy(
     return 1.0 if rel_error <= tolerance else 0.0
 
 
-_SCALE_WORD_RE = re.compile(r"(?i)\b(thousand|million|billion|[kmb])\b")
+_SCALE_WORD_RE = re.compile(r"(?i)\b(thousand|million|billion)\b")
+# Digit-adjacent abbreviations ("$142.5M", "142.5K", "1.2B") have no word
+# boundary between the digit and the letter (both are \w characters), so
+# \b[kmb]\b never matches them — this needs its own pattern anchored to a
+# preceding digit instead of relying on \b on both sides.
+_SCALE_SUFFIX_RE = re.compile(r"(?i)\d(k|m|b)\b")
 _SCALE_WORD_MULTIPLIER = {
     "thousand": 1_000, "k": 1_000,
     "million": 1_000_000, "m": 1_000_000,
@@ -156,15 +161,19 @@ _SCALE_WORD_MULTIPLIER = {
 
 
 def _detect_prediction_scale(value) -> Optional[int]:
-    """Looks for an explicit unit word in a string prediction (e.g. "304.8
-    million"). Returns None if the prediction isn't a string with a
-    detectable scale word, signaling the caller to skip normalization."""
+    """Looks for an explicit unit in a string prediction, either a full word
+    ("304.8 million") or a digit-adjacent abbreviation ("$142.5M", "1.2B").
+    Returns None if the prediction isn't a string with a detectable scale,
+    signaling the caller to skip normalization."""
     if not isinstance(value, str):
         return None
-    match = _SCALE_WORD_RE.search(value)
-    if not match:
-        return None
-    return _SCALE_WORD_MULTIPLIER.get(match.group(1).lower())
+    word_match = _SCALE_WORD_RE.search(value)
+    if word_match:
+        return _SCALE_WORD_MULTIPLIER.get(word_match.group(1).lower())
+    suffix_match = _SCALE_SUFFIX_RE.search(value)
+    if suffix_match:
+        return _SCALE_WORD_MULTIPLIER.get(suffix_match.group(1).lower())
+    return None
 
 
 # ---------------------------------------------------------------------------

@@ -63,6 +63,14 @@ def test_numerical_accuracy_percent_scale_is_not_multiplied():
     assert m.numerical_accuracy(13.4, 13.4, gold_scale="percent") == 1.0
 
 
+def test_numerical_accuracy_detects_digit_adjacent_abbreviation():
+    # "$142.5M" has no word boundary between "5" and "M" (both are \w
+    # characters), so a plain \b[kmb]\b pattern misses it entirely.
+    assert m.numerical_accuracy("$142.5M", 142500, gold_scale="thousand") == 1.0
+    assert m.numerical_accuracy("1.2B", 1200, gold_scale="million") == 1.0
+    assert m.numerical_accuracy("304.811K", 304811, gold_scale="") == 1.0
+
+
 def test_recall_precision_at_k():
     retrieved = ["doc_1", "doc_2", "doc_3", "doc_4", "doc_5"]
     relevant = ["doc_3", "doc_9"]

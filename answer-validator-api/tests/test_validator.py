@@ -101,16 +101,58 @@ def test_multi_span_requires_non_empty_values():
     assert out.valid is False
 
 
-def test_calculated_with_two_operands_needs_two_citations():
-    bad = {**CALCULATED_OK, "evidence": [CALCULATED_OK["evidence"][0]]}
-    out = validate_answer(bad)
-    assert out.valid is False
+def test_calculated_single_citation_covering_multiple_operands_is_valid():
+    # Dataset-verified pattern: a formula combining several numbers that all
+    # live on the same document page (e.g. "(656-719)/719", or an average of
+    # five same-page figures) is cited with exactly ONE evidence entry in
+    # every one of the 32 real single-document arithmetic examples checked.
+    # A validator that demanded evidence_count >= number-of-operands would
+    # incorrectly reject every one of them. This must pass.
+    answer = {
+        "answer_type": "calculated",
+        "evidence": [{"document_id": "doc_205", "page": 4, "section": "Segment Results"}],
+        "params": {"value": -8.76, "formula": "(656-719)/719"},
+    }
+    out = validate_answer(answer)
+    assert out.valid is True
+
+
+def test_calculated_single_citation_with_many_comma_formatted_operands_is_valid():
+    # Same pattern with six comma-formatted operands averaged together and
+    # still only one page cited — also drawn straight from the real data
+    # shape (e.g. a five/six-figure average on one page).
+    answer = {
+        "answer_type": "calculated",
+        "evidence": [{"document_id": "doc_311", "page": 12}],
+        "params": {
+            "value": 659439.4,
+            "formula": "(565,467+907,320+902,693+731,663+190,054)/5",
+        },
+    }
+    out = validate_answer(answer)
+    assert out.valid is True
+
+
+def test_calculated_two_citations_for_two_document_operands_is_still_valid():
+    # The cross-document pattern (operands from two different filings) still
+    # works fine with two citations -- this rule was never about forbidding
+    # multiple citations, only about not requiring them based on formula
+    # literal count.
+    out = validate_answer(CALCULATED_OK)
+    assert out.valid is True
 
 
 def test_malformed_evidence_missing_page():
     bad = {**DIRECT_OK, "evidence": [{"document_id": "doc_017"}]}
     out = validate_answer(bad)
     assert out.valid is False
+
+
+def test_calculated_still_requires_at_least_one_citation():
+    bad = {**CALCULATED_OK, "evidence": []}
+    out = validate_answer(bad)
+    assert out.valid is False
+    assert "Missing required evidence citation" in out.log_line
 
 
 def test_insufficient_evidence_requires_reason():

@@ -18,6 +18,13 @@ Responsibilities (from the Final Project spec, service #7):
 
 This module is pure (no FastAPI/logging side effects other than returning
 the exact strings) so it is trivial to unit test.
+
+Decision record — `calculated` evidence count: this validator enforces only
+that `evidence` is non-empty for `calculated` answers, with no minimum tied
+to the formula's contents. See README.md for the dataset analysis that
+justifies this (evidence count tracks distinct document/page sources, not
+formula literal count, and a validator has no gold data to check the former
+against).
 """
 from __future__ import annotations
 
@@ -135,21 +142,16 @@ def validate_answer(payload: dict) -> ValidationOutcome:
         # (already checked above) — documented limitation, see README.
         _ = values  # kept for clarity / future stricter checks
 
-    if answer_type == "calculated":
-        # Spec: "One citation per operand used in the formula." Exactly
-        # matching operand-count to evidence-count from a raw formula string
-        # is ambiguous (e.g. constants like *100 aren't cited), so we treat
-        # "non-empty evidence" (already enforced) as the hard requirement and
-        # additionally require at least 2 citations when the formula clearly
-        # combines two or more numbers, since a single-operand "calculation"
-        # is almost certainly a modeling mistake.
-        formula = raw.params.get("formula", "")
-        distinct_numeric_literals = _count_numeric_literals(formula)
-        if distinct_numeric_literals >= 2 and len(evidence_items) < 2:
-            return _typed_error(
-                answer_type,
-                "Formula combines multiple values but fewer than 2 evidence citations were provided.",
-            )
+    # `calculated` intentionally has no evidence-count rule beyond
+    # "non-empty" (enforced above). See the "Resolved: what 'one citation
+    # per operand' actually means" section in README.md for the dataset
+    # analysis this is based on: evidence-entry count tracks the number of
+    # distinct (document, page) sources behind the formula's operands, not
+    # the number of numeric literals in the formula string. A validator
+    # only sees the evidence array the agent declares — it has no gold data
+    # to check that count against — so the only thing it can safely enforce
+    # is the non-empty floor; the real per-operand attribution is the
+    # calculator tool's responsibility at generation time.
 
     # --- Success ---
     first_ev = evidence_items[0] if evidence_items else None
@@ -164,9 +166,3 @@ def validate_answer(payload: dict) -> ValidationOutcome:
             f"'{answer_type}' with evidence {ev_repr}."
         ),
     )
-
-
-def _count_numeric_literals(formula: str) -> int:
-    import re
-
-    return len(re.findall(r"\d+(?:\.\d+)?", formula))
