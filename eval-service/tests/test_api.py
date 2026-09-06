@@ -83,9 +83,14 @@ def test_benchmark_run_endpoint_uses_current_config_fields(monkeypatch):
         def post(self, url, json=None):
             return FakeResponse(
                 {
-                    "answer_type": "direct",
-                    "evidence": [{"document_id": "doc_017", "page": 1}],
-                    "params": {"value": "$142.5M"},
+                    "answer": {
+                        "answer_type": "direct",
+                        "evidence": [{"document_id": "doc_017", "page": 1}],
+                        "params": {"value": "$142.5M"},
+                    },
+                    "question_type": "financial_lookup",
+                    "retries_used": 0,
+                    "trace": [],
                 }
             )
 
@@ -121,23 +126,26 @@ def test_benchmark_run_from_file_endpoint_with_real_practice_file(monkeypatch):
     for q in questions:
         gold = q.get("ground_truth_answer")
         if q.get("answer_type") == "unanswerable" or gold is None:
-            by_text[q["question_text"]] = {
-                "answer_type": "insufficient_evidence",
-                "evidence": [],
-                "params": {"reason": "n/a"},
-            }
+            core = {"answer_type": "insufficient_evidence", "evidence": [], "params": {"reason": "n/a"}}
         elif isinstance(gold, list):
-            by_text[q["question_text"]] = {
+            core = {
                 "answer_type": "multi_span",
                 "evidence": [{"document_id": "doc", "page": 0}],
                 "params": {"values": gold},
             }
         else:
-            by_text[q["question_text"]] = {
+            core = {
                 "answer_type": "direct",
                 "evidence": [{"document_id": "doc", "page": 0}],
                 "params": {"value": gold},
             }
+        # Confirmed agent-service /answer shape.
+        by_text[q["question_text"]] = {
+            "answer": core,
+            "question_type": q.get("answer_type"),
+            "retries_used": 0,
+            "trace": [],
+        }
 
     class FakeResponse:
         def __init__(self, payload):

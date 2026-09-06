@@ -29,7 +29,10 @@ class FakeResponse:
 
 class FakeClient:
     """Stands in for httpx.Client: routes by URL to canned answers so the
-    benchmark harness can be tested without real network calls."""
+    benchmark harness can be tested without real network calls. Responses
+    use the confirmed agent-service /answer contract (nested under
+    "answer", plus question_type/retries_used/trace siblings) — this is the
+    real, confirmed shape, not a placeholder."""
 
     def __init__(self, *args, **kwargs):
         pass
@@ -46,16 +49,26 @@ class FakeClient:
             if "operating income" in question:
                 return FakeResponse(
                     {
-                        "answer_type": "direct",
-                        "evidence": [{"document_id": "doc_017", "page": 1}],
-                        "params": {"value": "$142.5M"},
+                        "answer": {
+                            "answer_type": "direct",
+                            "evidence": [{"document_id": "doc_017", "page": 1}],
+                            "params": {"value": "$142.5M"},
+                        },
+                        "question_type": "financial_lookup",
+                        "retries_used": 0,
+                        "trace": [],
                     }
                 )
             return FakeResponse(
                 {
-                    "answer_type": "insufficient_evidence",
-                    "evidence": [],
-                    "params": {"reason": "not found"},
+                    "answer": {
+                        "answer_type": "insufficient_evidence",
+                        "evidence": [],
+                        "params": {"reason": "not found"},
+                    },
+                    "question_type": "unanswerable",
+                    "retries_used": 1,
+                    "trace": [],
                 }
             )
         if url == "http://fake-validator/validate_answer":
@@ -99,6 +112,7 @@ def test_run_benchmark_end_to_end(monkeypatch):
     assert summary["exact_match"] == 1.0  # only q1 has a comparable gold answer
     assert summary["retrieval_recall_at_k"] == 1.0
     assert summary["num_errors"] == 0
+    assert summary["avg_retries_used"] == 0.5  # (0 + 1) / 2, from the confirmed contract's field
 
 
 # ---------------------------------------------------------------------------
@@ -156,14 +170,24 @@ def test_benchmark_runs_against_real_practice_file(monkeypatch):
     def fake_answer_for(question: dict) -> dict:
         gold = question.get("ground_truth_answer")
         if question.get("answer_type") == "unanswerable" or gold is None:
-            return {"answer_type": "insufficient_evidence", "evidence": [], "params": {"reason": "n/a"}}
-        evidence = [
-            {"document_id": e.get("source_doc_uid"), "page": e.get("source_page", 0)}
-            for e in (question.get("gold_evidence") or [])
-        ] or [{"document_id": "unknown", "page": 0}]
-        if isinstance(gold, list):
-            return {"answer_type": "multi_span", "evidence": evidence, "params": {"values": gold}}
-        return {"answer_type": "direct", "evidence": evidence, "params": {"value": gold}}
+            core = {"answer_type": "insufficient_evidence", "evidence": [], "params": {"reason": "n/a"}}
+        else:
+            evidence = [
+                {"document_id": e.get("source_doc_uid"), "page": e.get("source_page", 0)}
+                for e in (question.get("gold_evidence") or [])
+            ] or [{"document_id": "unknown", "page": 0}]
+            if isinstance(gold, list):
+                core = {"answer_type": "multi_span", "evidence": evidence, "params": {"values": gold}}
+            else:
+                core = {"answer_type": "direct", "evidence": evidence, "params": {"value": gold}}
+        # Confirmed agent-service /answer shape: the answer object nested
+        # under "answer", plus question_type/retries_used/trace siblings.
+        return {
+            "answer": core,
+            "question_type": question.get("answer_type"),
+            "retries_used": 0,
+            "trace": [],
+        }
 
     by_question_text = {q["question_text"]: fake_answer_for(q) for q in questions}
 
@@ -197,18 +221,46 @@ def test_benchmark_runs_against_real_practice_file(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Confirmed agent-service /answer contract: trace + question_type are
-# optional sibling fields, read if present, never required, never forwarded
-# to answer-validator-api (whose schema forbids unknown top-level keys).
+# Confirmed agent-service /answer contract: the answer object is nested
+# under "answer", with question_type/retries_used/trace as siblings. This
+# was confirmed end-to-end against the real feature/agent-service branch
+# (100/100, 0 errors, 100% schema validity, using answer_key="answer").
 # ---------------------------------------------------------------------------
 
 
-def test_split_core_answer_strips_trace_and_question_type():
+def test_split_core_answer_confirmed_nested_shape():
+    body = {
+        "answer": {
+            "answer_type": "direct",
+            "evidence": [{"document_id": "doc_017", "page": 1}],
+            "params": {"value": "$142.5M"},
+        },
+        "question_type": "financial_lookup",
+        "retries_used": 2,
+        "trace": [{"step": "classify"}, {"step": "retrieve"}, {"step": "generate"}],
+    }
+    core, system_trace, question_type = _split_core_answer_and_metadata(body, answer_key="answer")
+    assert core == {
+        "answer_type": "direct",
+        "evidence": [{"document_id": "doc_017", "page": 1}],
+        "params": {"value": "$142.5M"},
+    }
+    # trace/question_type are read from the top level, as confirmed
+    # siblings of "answer" -- not from inside the nested answer object.
+    assert system_trace == [{"step": "classify"}, {"step": "retrieve"}, {"step": "generate"}]
+    assert question_type == "financial_lookup"
+
+
+def test_split_core_answer_flat_shape_still_supported():
+    """`answer_key=None` still supports a system that returns the bare
+    answer object with trace/question_type as top-level siblings (no
+    "answer" wrapper) — kept for systems other than the confirmed
+    agent-service contract, or for future/alternate configurations."""
     body = {
         "answer_type": "direct",
         "evidence": [{"document_id": "doc_017", "page": 1}],
         "params": {"value": "$142.5M"},
-        "trace": {"anything": "agent-service decides this shape, not us"},
+        "trace": {"anything": "a system could shape this however it wants"},
         "question_type": "financial_lookup",
     }
     core, system_trace, question_type = _split_core_answer_and_metadata(body, answer_key=None)
@@ -217,7 +269,7 @@ def test_split_core_answer_strips_trace_and_question_type():
         "evidence": [{"document_id": "doc_017", "page": 1}],
         "params": {"value": "$142.5M"},
     }
-    assert system_trace == {"anything": "agent-service decides this shape, not us"}
+    assert system_trace == {"anything": "a system could shape this however it wants"}
     assert question_type == "financial_lookup"
 
 
@@ -234,8 +286,8 @@ def test_split_core_answer_handles_missing_trace_and_question_type():
 
 
 class ContractFakeClient:
-    """Mimics the confirmed agent-service /answer contract: the answer
-    object plus sibling trace/question_type fields, at the top level."""
+    """Mimics the confirmed agent-service /answer contract exactly:
+    {"answer": {...}, "question_type": ..., "retries_used": N, "trace": [...]}."""
 
     def __init__(self, *a, **kw):
         pass
@@ -250,11 +302,14 @@ class ContractFakeClient:
         if url == "http://fake-agent/answer":
             return FakeResponse(
                 {
-                    "answer_type": "direct",
-                    "evidence": [{"document_id": "doc_017", "page": 1}],
-                    "params": {"value": "$142.5M"},
-                    "trace": {"steps": ["classify", "retrieve", "generate"]},
+                    "answer": {
+                        "answer_type": "direct",
+                        "evidence": [{"document_id": "doc_017", "page": 1}],
+                        "params": {"value": "$142.5M"},
+                    },
                     "question_type": "financial_lookup",
+                    "retries_used": 2,
+                    "trace": [{"step": "classify"}, {"step": "retrieve"}, {"step": "generate"}],
                 }
             )
         if url == "http://fake-validator/validate_answer":
@@ -285,9 +340,15 @@ def test_benchmark_stores_system_trace_and_strips_it_before_validation(monkeypat
     report = run_benchmark(config)
     result = report["results"][0]
 
-    assert result["system_trace"] == {"steps": ["classify", "retrieve", "generate"]}
+    assert result["system_trace"] == [
+        {"step": "classify"},
+        {"step": "retrieve"},
+        {"step": "generate"},
+    ]
     assert result["question_type"] == "financial_lookup"
     assert result["schema_valid"] is True
+    assert result["extra_perf"]["retries_used"] == 2
+    assert report["summary"]["avg_retries_used"] == 2.0
     # The validator must only ever see the bare three-key answer object.
     assert set(ContractFakeClient.last_validator_payload.keys()) == {
         "answer_type",

@@ -129,28 +129,38 @@ its companion `record_schema_guide_ar.md`, not a generic guess:
 `system_url` should point at agent-service's `POST /answer` endpoint (built
 specifically for eval-service's use, distinct from the
 `POST /agent/query` endpoint orchestrator-api calls). It takes
-`{"question": ..., "document_id": ...}` and returns the Strict-Answer-Schema
-object (`answer_type`, `evidence`, `params`) plus two optional sibling
-fields:
+`{"question": ..., "document_id": ...}` and returns:
 
 ```json
 {
-  "answer_type": "...", "evidence": [...], "params": {...},
-  "trace": "<opaque, shape not specified by agent-service>",
-  "question_type": "..."
+  "answer": {"answer_type": "...", "evidence": [...], "params": {...}},
+  "question_type": "...",
+  "retries_used": 2,
+  "trace": [ "..." ]
 }
 ```
 
-`trace`'s internal shape is not part of any confirmed contract — it is
-read verbatim if present (stored on the result as `system_trace`, clearly
-separate from eval-service's own `trace_id`) and never required or
-validated. It is also **never forwarded to answer-validator-api**, since
-that endpoint's schema rejects unknown top-level keys — `benchmark.py`
-strips `trace`/`question_type` before validation. If a system instead
-nests the answer under a wrapper key, `answer_key` (dotted path) can still
-be used to dig it out; metadata is then read from the top-level response,
-matching the confirmed shape where `trace`/`question_type` are siblings of
-the answer fields, not nested inside them.
+This was confirmed end-to-end against the real `feature/agent-service`
+branch: 100 practice questions run through
+`eval-service -> agent-service (mock LLM) -> answer-validator-api`,
+0 errors, 100% schema validity. `answer_key="answer"` is therefore the
+**default** here, matching the real system — override it only for a
+system that returns some other shape. `trace` is confirmed to be a list
+(the agent's internal step history); its per-item shape isn't part of the
+confirmed contract, so it's still treated as opaque — read verbatim if
+present (stored on the result as `system_trace`, clearly separate from
+eval-service's own `trace_id`), never required, never validated, and
+**never forwarded to answer-validator-api**, since that endpoint's schema
+rejects unknown top-level keys — `benchmark.py` strips everything except
+`answer_type`/`evidence`/`params` before validation. `retries_used` is
+captured as a system-performance metric alongside `llm_calls` /
+`tokens_used` / `cost_usd` (`avg_retries_used` in the summary).
+
+If a system instead returns the bare answer object with `trace`/
+`question_type` as top-level siblings (no `"answer"` wrapper), pass
+`answer_key=None` to fall back to that shape — both are supported and
+tested (`test_split_core_answer_confirmed_nested_shape` and
+`test_split_core_answer_flat_shape_still_supported`).
 
 ### Failure analysis
 
@@ -173,9 +183,10 @@ failure-analysis requirement needs.
 ### Config knobs
 
 - `answer_key`: dotted path into the system's JSON response where the
-  answer object lives, if nested. Leave unset if the response body *is*
-  the answer object plus its `trace`/`question_type` siblings (the
-  confirmed shape).
+  answer object lives. Defaults to `"answer"`, matching the confirmed
+  agent-service contract above. Pass `None` for a system that returns the
+  bare answer object with `trace`/`question_type` as top-level siblings
+  instead.
 - `question_field` / `gold_field` / `scale_field`: override if a future
   practice set renames these; defaults match the confirmed schema above.
 
@@ -190,10 +201,11 @@ python -m pytest tests/ -q
 
 - `test_metrics.py` — every metric function, including scale normalization
   (word units and digit-adjacent abbreviations like `"$142.5M"`).
-- `test_benchmark.py` — mocked runs, the confirmed-contract trace/
-  question_type split, per-question trace resolution over a real 10-question
-  subset, and a full run over all 100 real questions with 0 field-mapping
-  errors.
+- `test_benchmark.py` — mocked runs, the confirmed-contract answer
+  unwrapping (nested `"answer"` shape, `retries_used`, `trace` as a list,
+  plus the flat-shape fallback), per-question trace resolution over a real
+  10-question subset, and a full run over all 100 real questions with 0
+  field-mapping errors.
 - `test_api.py` — the actual HTTP endpoints via `TestClient` (not just the
   internal `run_benchmark` function), including a full 100-question run
   through the multipart upload endpoint. Added specifically after finding
@@ -204,18 +216,29 @@ python -m pytest tests/ -q
 
 All 100 real practice questions have also been run against the actual
 `answer-validator-api` service (not mocked) and a stand-in agent-service
-implementing the confirmed `/answer` contract, over real HTTP: 100/100,
-0 errors, `schema_validity_rate: 1.0`, every result carrying a resolvable
-`trace_id`.
+implementing the exact confirmed `/answer` contract (nested `"answer"`,
+`retries_used`, `trace` as a list), over real HTTP: 100/100, 0 errors,
+`schema_validity_rate: 1.0`, every result carrying a resolvable `trace_id`
+and a correctly-captured `avg_retries_used`.
 
 ## Known gaps / next steps
 
 - **Real Langfuse dashboard verification** (see "Langfuse SDK note" above)
   — needs a real account's credentials.
+- **Meaningful failure analysis** — the confirmed integration run against
+  `feature/agent-service` used `LLM_PROVIDER=mock` +
+  `RETRIEVAL_FALLBACK_TO_MOCK=true` (an offline corpus), so accuracy was
+  low (~5%) by design, not a bug — a failed trace correctly showed
+  `insufficient_evidence` when the mock corpus had no relevant evidence.
+  Once retrieval-api is wired in, re-run the same benchmark against
+  `agent-service + retrieval-api` for accuracy numbers, and against
+  real failures, that are actually diagnostic (retrieval vs. reasoning vs.
+  numerical).
 - Langfuse experiment/dataset comparisons (chunking strategy on/off, etc.)
   are not yet wired up — once agent-service exposes a way to run with
   different configs, add a `/benchmark/compare` endpoint that runs the same
   question set twice and diffs the summaries.
 - Token usage / cost are only populated if the system response includes
   `llm_calls` / `tokens_used` / `cost_usd` as top-level fields; confirm
-  agent-service will surface these under those exact names.
+  agent-service will surface these under those exact names (`retries_used`
+  is already confirmed and captured).

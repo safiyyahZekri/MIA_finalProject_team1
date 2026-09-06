@@ -88,7 +88,7 @@ class BenchmarkRunRequest(BaseModel):
     system_url: str
     questions: List[dict]
     validator_url: Optional[str] = None
-    answer_key: Optional[str] = None
+    answer_key: Optional[str] = "answer"
     retrieval_k: int = 5
     question_field: str = "question_text"
     gold_field: str = "ground_truth_answer"
@@ -115,7 +115,7 @@ def benchmark_run(req: BenchmarkRunRequest):
 async def benchmark_run_from_file(
     system_url: str = Form(...),
     validator_url: Optional[str] = Form(None),
-    answer_key: Optional[str] = Form(None),
+    answer_key: Optional[str] = Form("answer"),
     retrieval_k: int = Form(5),
     question_field: str = Form("question_text"),
     gold_field: str = Form("ground_truth_answer"),

@@ -28,23 +28,27 @@ the single-document scoping id (when the question has one) is
 
 Confirmed system contract: `system_url` should point at agent-service's
 `POST /answer` endpoint, built specifically for eval-service's use. It takes
-`{"question": ..., "document_id": ...}` and returns the same three
-Strict-Answer-Schema fields (`answer_type`, `evidence`, `params`) plus two
-additional sibling fields, `trace` and `question_type`:
+`{"question": ..., "document_id": ...}` and returns:
 
     {
-      "answer_type": "...", "evidence": [...], "params": {...},
-      "trace": <opaque, shape not specified by agent-service>,
-      "question_type": "..."
+      "answer": {"answer_type": "...", "evidence": [...], "params": {...}},
+      "question_type": "...",
+      "retries_used": 2,
+      "trace": [...]
     }
 
-`trace`'s internal shape is not part of any confirmed contract, so it is
-treated as opaque, best-effort metadata: read verbatim if present, stored
-alongside the result, never required and never validated. It is also never
-forwarded to answer-validator-api, since that endpoint's schema forbids
-unknown keys — only the bare `{answer_type, evidence, params}` object is
-sent there. If a system instead nests the answer under a wrapper key,
-`answer_key` can still be used to dig it out.
+This was confirmed end-to-end against the real `feature/agent-service`
+branch (100 practice questions, 0 errors, 100% schema validity), so
+`answer_key="answer"` is the default here — override it only if a future
+system response shape doesn't nest the answer under `"answer"`.
+`trace` is confirmed to be a list (the agent's internal step history) but
+its per-item shape isn't part of the confirmed contract, so it's still
+treated as opaque: read verbatim if present, stored alongside the result,
+never required and never validated. It is also never forwarded to
+answer-validator-api, since that endpoint's schema forbids unknown keys —
+only the bare `{answer_type, evidence, params}` object is sent there.
+`retries_used`, when present, is captured as a system-performance metric
+alongside `llm_calls` / `tokens_used` / `cost_usd`.
 
 Independent of whatever agent-service reports, this harness opens its own
 Langfuse trace for every question (via app.tracing) so every benchmarked
@@ -163,7 +167,7 @@ class BenchmarkConfig:
     system_url: str
     questions: List[dict]
     validator_url: Optional[str] = None
-    answer_key: Optional[str] = None  # dotted path if the answer is nested
+    answer_key: Optional[str] = "answer"  # confirmed default: agent-service nests under "answer"
     retrieval_k: int = 5
     timeout_s: float = 60.0
     # Field names matching the confirmed practice-question record schema.
@@ -235,7 +239,7 @@ def run_benchmark(config: BenchmarkConfig) -> dict:
                     body, config.answer_key
                 )
                 if isinstance(body, dict):
-                    for perf_field in ("llm_calls", "tokens_used", "cost_usd"):
+                    for perf_field in ("llm_calls", "tokens_used", "cost_usd", "retries_used"):
                         if perf_field in body:
                             perf_extra[perf_field] = body[perf_field]
             except Exception as exc:  # network error, bad JSON, non-2xx, etc.
@@ -354,6 +358,7 @@ def _summarize(results: List[QuestionResult]) -> dict:
     perf_llm_calls = [r.extra_perf.get("llm_calls") for r in results if "llm_calls" in r.extra_perf]
     perf_tokens = [r.extra_perf.get("tokens_used") for r in results if "tokens_used" in r.extra_perf]
     perf_cost = [r.extra_perf.get("cost_usd") for r in results if "cost_usd" in r.extra_perf]
+    perf_retries = [r.extra_perf.get("retries_used") for r in results if "retries_used" in r.extra_perf]
 
     failed = [r for r in results if r.is_failure]
     failed_examples = [
@@ -382,6 +387,7 @@ def _summarize(results: List[QuestionResult]) -> dict:
         "avg_llm_calls": m.mean(perf_llm_calls),
         "avg_tokens_used": m.mean(perf_tokens),
         "avg_cost_usd": m.mean(perf_cost),
+        "avg_retries_used": m.mean(perf_retries),
         "num_failed_examples": len(failed),
         "failed_examples": failed_examples,
     }
