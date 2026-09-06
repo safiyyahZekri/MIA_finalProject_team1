@@ -1,6 +1,5 @@
 from document_processing import JSON_Processing,PDF_to_Image,OCR_Model
 from fastapi import FastAPI,File,UploadFile,HTTPException
-
 app=FastAPI()
 
 
@@ -17,6 +16,7 @@ async def document_processor(file:UploadFile=File(...)):
     
     pdf=await file.read()
     if not pdf:
+
         raise HTTPException(status_code=400,detail="Empty pdf")
     try:
         pdf_to_image=PDF_to_Image().convert(pdf)

@@ -1,12 +1,11 @@
 from doctr.models import ocr_predictor
-from doctr.io import DocumentFile 
 import uuid
 from typing import List,Union,Literal
 from pydantic import BaseModel
 import numpy as np
 import pymupdf
 import torch
-
+import matplotlib.pyplot as plt
 class Word(BaseModel):
     word_list:List[str]
     bbox_list:List[List[int]]
@@ -49,22 +48,23 @@ class DocumentJSON(BaseModel):
 class PDF_to_Image():
     def convert(self,pdf_path):
         images=[]
-        image=pymupdf.open(stream=pdf_path,filetype="pdf")
+        image=pymupdf.open(pdf_path,filetype="pdf")
         page_count=image.page_count
         for page in range(page_count):
             image_bytes=image[page].get_pixmap(matrix=pymupdf.Matrix(2,2),alpha=False,colorspace=pymupdf.csRGB)
             image_bytes_flattened=image_bytes.samples
             image_matrix=np.frombuffer(image_bytes_flattened,dtype=np.uint8).reshape(image_bytes.height,image_bytes.width,3)
             images.append(image_matrix)
+       
         return images
             
 
 class OCR_Model():
     def __init__(self):
-        self.device=torch.device('cuda' if torch.cuda().is_available() else 'cpu')
+        self.device=torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-        self.model=ocr_predictor(pretrained=True,detect_tables=True,detect_layout=True)
-        self.model=self.model.to(device)
+        self.model=ocr_predictor(pretrained=True,preserve_aspect_ratio=True,detect_tables=True,detect_layout=True)
+        self.model=self.model.to(self.device)
     def __call__(self,pdf_to_image):
         return self.model(pdf_to_image)
 
@@ -72,6 +72,8 @@ class OCR_Model():
 
 
 def JSON_Processing(output,pdf_to_image):
+    if(len(output.pages)!=len(pdf_to_image)):
+        raise ValueError("OCR model generated unequal amount of pages ")
     pages_list=[]
     for page_number,page in enumerate(output.pages):
         page_no=page_number+1
@@ -79,6 +81,8 @@ def JSON_Processing(output,pdf_to_image):
         blocks_list=[]
         for block in page.blocks:
             for line in block.lines:
+                if not line.words:
+                    continue
                 x2=y2=100000
                 x3=y3=-1 #Line geometry isnt provided so we use the min and max geometry of each word
                 words_list=[]
@@ -143,8 +147,4 @@ def JSON_Processing(output,pdf_to_image):
                         
     return DocumentJSON(pages=pages_list,document_id=str(uuid.uuid4()))
                 
-    
 
-                    
-                    
-        
