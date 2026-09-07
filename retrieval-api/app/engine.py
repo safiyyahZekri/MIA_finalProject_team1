@@ -7,8 +7,8 @@ import re
 import threading
 import time
 from collections import defaultdict
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable
 
 import faiss
 import numpy as np
@@ -298,14 +298,18 @@ class RetrievalEngine:
             return False
         if filters.source_doc_uid is not None and chunk.source_doc_uid != filters.source_doc_uid:
             return False
-        if filters.source_filename is not None:
-            if filters.source_filename.lower() not in chunk.source_filename.lower():
-                return False
+        if (
+            filters.source_filename is not None
+            and filters.source_filename.lower() not in chunk.source_filename.lower()
+        ):
+            return False
         if filters.page is not None and chunk.page != filters.page:
             return False
-        if filters.section is not None:
-            if filters.section.lower() not in chunk.section.lower():
-                return False
+        if (
+            filters.section is not None
+            and filters.section.lower() not in chunk.section.lower()
+        ):
+            return False
         if filters.content_type is not None and chunk.content_type != filters.content_type:
             return False
         return all(

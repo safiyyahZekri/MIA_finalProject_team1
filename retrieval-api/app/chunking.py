@@ -54,7 +54,13 @@ def _looks_like_heading(block: DocumentBlock, text: str) -> bool:
     if not letters:
         return False
     uppercase_ratio = sum(character.isupper() for character in letters) / len(letters)
-    numbered = bool(re.match(r"^(?:item\s+)?(?:\d+(?:\.\d+)*|[IVX]+)[.)]?\s+", text, re.I))
+    numbered = bool(
+        re.match(
+            r"^(?:item\s+)?(?:\d+(?:\.\d+)*|[IVX]+)[.)]?\s+",
+            text,
+            re.IGNORECASE,
+        )
+    )
     colon_heading = text.endswith(":") and len(words) <= 8
     known_heading = text.lower().rstrip(":") in STRUCTURAL_HEADINGS
     return uppercase_ratio >= 0.85 or numbered or colon_heading or known_heading
@@ -171,6 +177,16 @@ def _table_parts(rows: list[str], header_row_count: int, max_chars: int) -> list
     return parts
 
 
+def _flush_paragraphs(
+    paragraph_group: list[DocumentBlock],
+    section: str,
+    destination: list[tuple[str, list[DocumentBlock]]],
+) -> list[DocumentBlock]:
+    if paragraph_group:
+        destination.append((section, paragraph_group))
+    return []
+
+
 def build_chunks(request: IndexDocumentRequest, config: ChunkingConfig) -> list[Chunk]:
     document = request.document
     filename = request.source_filename or document.document_id
@@ -182,17 +198,13 @@ def build_chunks(request: IndexDocumentRequest, config: ChunkingConfig) -> list[
         page_paragraphs: list[tuple[str, list[DocumentBlock]]] = []
         recent_text: list[str] = []
 
-        def flush_paragraphs() -> None:
-            nonlocal paragraph_group
-            if paragraph_group:
-                page_paragraphs.append((active_section, paragraph_group))
-                paragraph_group = []
-
         for block in sorted(page.blocks, key=lambda item: item.order):
             clean_text = _clean(block.text)
             if block.content_type == "table":
                 context = "\n".join(recent_text[-2:])
-                flush_paragraphs()
+                paragraph_group = _flush_paragraphs(
+                    paragraph_group, active_section, page_paragraphs
+                )
                 table = _serialize_table(block, context)
                 if not table.rows:
                     continue
@@ -246,19 +258,23 @@ def build_chunks(request: IndexDocumentRequest, config: ChunkingConfig) -> list[
                 continue
             recent_text.append(clean_text)
             if _looks_like_heading(block, clean_text):
-                flush_paragraphs()
+                paragraph_group = _flush_paragraphs(
+                    paragraph_group, active_section, page_paragraphs
+                )
                 active_section = clean_text.rstrip(":")
                 paragraph_group = [block]
                 continue
 
             prospective = "\n".join(item.text for item in [*paragraph_group, block])
             if paragraph_group and len(prospective) > config.max_chars:
-                flush_paragraphs()
+                paragraph_group = _flush_paragraphs(
+                    paragraph_group, active_section, page_paragraphs
+                )
                 if config.overlap_blocks:
                     previous_blocks = page_paragraphs[-1][1]
                     paragraph_group = previous_blocks[-config.overlap_blocks :]
             paragraph_group.append(block)
-        flush_paragraphs()
+        _flush_paragraphs(paragraph_group, active_section, page_paragraphs)
 
         for section, blocks in page_paragraphs:
             text = "\n".join(_clean(block.text) for block in blocks)

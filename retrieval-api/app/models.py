@@ -64,7 +64,7 @@ class IndexDocumentRequest(BaseModel):
     metadata: dict[str, MetadataValue] = Field(default_factory=dict)
 
     @model_validator(mode="after")
-    def normalize_identity(self) -> "IndexDocumentRequest":
+    def normalize_identity(self) -> IndexDocumentRequest:
         metadata_uid = self.metadata.get("source_doc_uid")
         uid = self.source_doc_uid or self.document.source_doc_uid
         if uid is None and isinstance(metadata_uid, str) and metadata_uid.strip():
@@ -128,7 +128,7 @@ class SearchFilters(BaseModel):
     metadata: dict[str, MetadataValue] = Field(default_factory=dict)
 
     @model_validator(mode="after")
-    def normalize_aliases(self) -> "SearchFilters":
+    def normalize_aliases(self) -> SearchFilters:
         if self.filename and self.source_filename and self.filename != self.source_filename:
             raise ValueError("filename conflicts with source_filename")
         self.source_filename = self.source_filename or self.filename
@@ -154,7 +154,7 @@ class SearchRequest(BaseModel):
     trace_id: str | None = None
 
     @model_validator(mode="after")
-    def normalize_legacy_filters(self) -> "SearchRequest":
+    def normalize_legacy_filters(self) -> SearchRequest:
         if self.candidate_k < self.top_k:
             raise ValueError("candidate_k must be greater than or equal to top_k")
         aliases = {
