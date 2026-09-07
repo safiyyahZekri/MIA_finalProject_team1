@@ -20,7 +20,7 @@ async def document_processor(file:UploadFile=File(...)):
         pdf_to_image, png_bytes_list = PDF_to_Image().convert(pdf)
         ocr_output = OCR_Model()(pdf_to_image)
         table_model = Table_Model()
-        return JSON_Processing(ocr_output, pdf_to_image, png_bytes_list, pdf, table_model)
+        return JSON_Processing(ocr_output, pdf_to_image, png_bytes_list, pdf, table_model,file.filename)
 
 
 

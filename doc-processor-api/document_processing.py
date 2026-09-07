@@ -57,6 +57,7 @@ class Page(BaseModel):
 class DocumentJSON(BaseModel):
     pages: List[Page]
     document_id: str
+    source_doc_uid:uuid.UUID | None=None
 
 
 class PDF_to_Image:
@@ -265,7 +266,7 @@ def _stitch_header_row(table_block: Table_Block, col_edges, all_lines, header_se
     return used_uuids
 
 
-def JSON_Processing(output, pdf_to_image, png_bytes_list, pdf_bytes, table_model):
+def JSON_Processing(output, pdf_to_image, png_bytes_list, pdf_bytes, table_model,original_filename=None):
     if len(output.pages) != len(pdf_to_image):
         raise ValueError("OCR model generated unequal amount of pages ")
 
@@ -359,6 +360,6 @@ def JSON_Processing(output, pdf_to_image, png_bytes_list, pdf_bytes, table_model
             )
         )
 
-    return DocumentJSON(pages=pages_list, document_id=get_document_id(pdf_bytes))
+    return DocumentJSON(pages=pages_list, document_id=get_document_id(pdf_bytes),source_doc_uid=uuid.uuid4(),original_filename=original_filename)
 
 
