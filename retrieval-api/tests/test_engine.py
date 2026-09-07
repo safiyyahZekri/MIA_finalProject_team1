@@ -88,3 +88,54 @@ def test_corpus_wide_query_can_return_evidence_from_two_documents(
         "doc-cts-2019",
         "doc-jabil-2019",
     }
+
+
+def test_batch_indexing_preserves_source_identity_and_rebuilds_once(
+    engine, sample_document: dict
+) -> None:
+    cts = deepcopy(sample_document)
+    cts["source_doc_uid"] = "tatdqa-cts"
+    jabil = deepcopy(sample_document)
+    jabil["document"]["document_id"] = "random-processor-id"
+    jabil["source_doc_uid"] = "tatdqa-jabil"
+    jabil["source_filename"] = "jabil-circuit-inc_2019.pdf"
+    jabil["document"]["pages"][0]["blocks"][2]["uuid"] = "jabil-table"
+
+    result = engine.index_documents(
+        [
+            IndexDocumentRequest.model_validate(cts),
+            IndexDocumentRequest.model_validate(jabil),
+        ]
+    )
+    search = engine.search(
+        SearchRequest.model_validate(
+            {
+                "query": "finished goods",
+                "source_doc_uid": "tatdqa-jabil",
+                "rerank": False,
+            }
+        )
+    )
+
+    assert result.documents_indexed == 2
+    assert result.chunks_indexed > 0
+    assert search.hits
+    assert {hit.document_id for hit in search.hits} == {"tatdqa-jabil"}
+    assert {hit.source_doc_uid for hit in search.hits} == {"tatdqa-jabil"}
+    assert {hit.filename for hit in search.hits} == {"jabil-circuit-inc_2019.pdf"}
+
+
+def test_every_mode_returns_monotonic_normalized_scores(
+    engine, sample_document: dict
+) -> None:
+    engine.index_document(IndexDocumentRequest.model_validate(sample_document))
+    for mode in ("dense", "lexical", "hybrid"):
+        result = engine.search(
+            SearchRequest.model_validate(
+                {"query": "finished goods 2019", "mode": mode, "rerank": False}
+            )
+        )
+        assert result.hits
+        scores = [hit.score for hit in result.hits]
+        assert all(0.0 <= score <= 1.0 for score in scores)
+        assert scores == sorted(scores, reverse=True)

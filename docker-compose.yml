@@ -1,0 +1,70 @@
+services:
+  orchestrator-api:
+    build: ./orchestrator-api
+    ports:
+      - "8000:8000"
+    environment:
+      MOCK_MODE: "false"
+      DOC_PROCESSOR_URL: http://doc-processor-api:8001
+      RETRIEVAL_SERVICE_URL: http://retrieval-api:8002
+      AGENT_SERVICE_URL: http://agent-service:8003
+      VALIDATOR_SERVICE_URL: http://answer-validator-api:8004
+    depends_on:
+      - doc-processor-api
+      - retrieval-api
+      - agent-service
+      - answer-validator-api
+
+  doc-processor-api:
+    build: ./doc-processor-api
+    ports:
+      - "8001:8001"
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  retrieval-api:
+    build: ./retrieval-api
+    ports:
+      - "8002:8002"
+    environment:
+      LEDGER_RETRIEVAL_PORT: "8002"
+      LEDGER_RETRIEVAL_DATA_DIR: /data
+      EVAL_SERVICE_URL: http://eval-service:8005
+    volumes:
+      - retrieval-data:/data
+      - model-cache:/root/.cache/huggingface
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8002/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    depends_on:
+      - eval-service
+
+  agent-service:
+    build: ./agent-service
+    ports:
+      - "8003:8003"
+    environment:
+      LLM_PROVIDER: mock
+      RETRIEVAL_API_URL: http://retrieval-api:8002
+      RETRIEVAL_FALLBACK_TO_MOCK: "false"
+    depends_on:
+      - retrieval-api
+
+  answer-validator-api:
+    build: ./answer-validator-api
+    ports:
+      - "8004:8004"
+
+  eval-service:
+    build: ./eval-service
+    ports:
+      - "8005:8005"
+
+volumes:
+  retrieval-data:
+  model-cache:
