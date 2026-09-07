@@ -250,8 +250,8 @@ def _stitch_header_row(table_block: Table_Block, col_edges, all_lines, header_se
             Cell(
                 bbox=[min(xs), min(ys), max(xs), max(ys)],
                 text=text,
-                row_span=[0, 0],
-                col_span=[col, col],
+                row_span=[0, 1],
+                col_span=[col, col+1],
             )
         )
         min_x = min(min_x, min(xs))
