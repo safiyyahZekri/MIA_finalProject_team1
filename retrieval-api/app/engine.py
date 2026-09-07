@@ -104,6 +104,17 @@ class RetrievalEngine:
         self._bm25: BM25Okapi | None = None
         self._load()
 
+    def warmup(self) -> None:
+        """Force the embedder (and reranker, if configured) to load their
+        model weights now, during startup, instead of lazily on whichever
+        request happens to be the first real dense search. Without this,
+        the first caller after a fresh container start pays for the
+        model download/load inline and can time out client-side even
+        though the server is still working correctly in the background."""
+        self.embedder.encode_query("warmup")
+        if self.reranker is not None:
+            self.reranker.score("warmup", ["warmup"])
+
     @property
     def chunks_path(self) -> Path:
         return self.data_dir / "chunks.jsonl"
