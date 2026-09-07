@@ -161,7 +161,7 @@ def _band_overlap_span(x0, x1, edges, min_overlap_fraction=0.2):
                 key=lambda i: abs(center - (edges[i] + edges[i + 1]) / 2),
             )
         ]
-    return min(covered), max(covered)
+    return min(covered), max(covered)+1
 
 
 
