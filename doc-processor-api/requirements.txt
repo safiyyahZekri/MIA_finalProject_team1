@@ -98,7 +98,6 @@ starlette==1.6.0
 sympy==1.14.0
 torch==2.14.0
 torchvision==0.29.0
-torchserve
 tornado==6.5.8
 tqdm==4.70.0
 traitlets==5.16.1
@@ -113,3 +112,5 @@ validators==0.35.0
 watchfiles==1.2.0
 wcwidth==0.8.3
 websockets==17.1
+img2table
+hashlib
