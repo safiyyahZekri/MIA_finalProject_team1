@@ -59,6 +59,14 @@ def create_app(
         settings.eval_service_url, settings.tracing_timeout_seconds
     )
 
+    @application.on_event("startup")
+    def _warmup_models() -> None:
+        # Blocks Uvicorn from accepting connections until the embedder/
+        # reranker are actually loaded, so a healthy container is truly
+        # ready to serve a fast search rather than reporting healthy
+        # before ever having loaded its models.
+        application.state.engine.warmup()
+
     @application.get("/health")
     def health(request: Request) -> dict[str, str | int | bool]:
         corpus = request.app.state.engine.stats()

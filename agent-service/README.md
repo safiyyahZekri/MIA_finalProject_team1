@@ -112,8 +112,15 @@ question.
   itself, but too limited for real TAT-DQA coverage (fixed at 2 numeric
   operands, no sorting/composed arithmetic) — don't demo or grade against
   this mode.
-- **`LLM_PROVIDER=ollama`** — real local LLM (see above). Recommended default
-  for this project since you're running qwen2.5 locally.
+- **`LLM_PROVIDER=ollama`** — real local LLM via `ollama serve`. Good for
+  solo development, but **only works on the machine Ollama is installed
+  on** — don't rely on this for the team's actual demo/grading unless
+  everyone installs Ollama, or the run always happens on the same laptop.
+- **`LLM_PROVIDER=groq`** — hosted LLM via a shared `GROQ_API_KEY` (get one
+  free at https://console.groq.com). Fast, and doesn't depend on any one
+  teammate's machine being on — **recommended for the team demo**, since
+  it works identically no matter whose computer runs `docker compose up`.
+  Uses `GROQ_MODEL` (defaults to `llama-3.3-70b-versatile`).
 - **`LLM_PROVIDER=anthropic`** — set `ANTHROPIC_API_KEY` and optionally
   `ANTHROPIC_MODEL` (defaults to `claude-haiku-4-5-20251001`) to use Claude
   instead, via structured output.
@@ -121,6 +128,12 @@ question.
   running service. The contract this client expects is documented at the
   top of `app/retrieval_client.py` (`/search/vector`, `/search/bm25`,
   `/search/tables`, `/filter`, all returning `{"hits":[...]}`).
+
+All three real providers (`ollama`, `groq`, `anthropic`) share the same
+reliability contract: every LLM call is requested in JSON mode, validated
+against the same pydantic schemas, retried once on malformed output, and
+degraded to the offline mock heuristic as a last resort for that single
+call — a bad or slow model response never crashes a request.
 
 ## Architecture — how the graph satisfies the spec
 

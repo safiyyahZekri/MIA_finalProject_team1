@@ -148,6 +148,66 @@ def test_ollama_ping_false_when_unreachable():
     assert llm.ping() is False
 
 
+# ---------------------------------------------------------------- groq --
+def test_groq_falls_back_to_mock_when_unreachable():
+    """GroqLLM must never raise out of classify/grade/reformulate/extract
+    just because the API is unreachable or the key is bad -- it should
+    degrade to the same mock heuristic used by the offline provider."""
+    import os
+
+    from app.llm import GroqLLM
+
+    os.environ.setdefault("GROQ_API_KEY", "test-key-not-real")
+    from app.config import settings as _settings
+
+    _settings.GROQ_API_KEY = _settings.GROQ_API_KEY or "test-key-not-real"
+
+    llm = GroqLLM()
+    llm.base_url = "http://localhost:1"  # nothing listens here
+    llm._client = __import__("httpx").Client(timeout=1)
+
+    classification = llm.classify("What was the operating income reported in 2020?")
+    assert classification.question_type in ("numerical", "table", "text")
+
+    grade = llm.grade("some question", [])
+    assert grade.sufficient is False
+
+    query = llm.reformulate("q", "prev query", 1)
+    assert isinstance(query, str) and query
+
+    extraction = llm.extract("What was the operating income?", "text", [])
+    assert extraction is not None
+
+
+def test_groq_ping_false_when_unreachable():
+    import os
+
+    from app.llm import GroqLLM
+
+    os.environ.setdefault("GROQ_API_KEY", "test-key-not-real")
+    from app.config import settings as _settings
+
+    _settings.GROQ_API_KEY = _settings.GROQ_API_KEY or "test-key-not-real"
+
+    llm = GroqLLM()
+    llm.base_url = "http://localhost:1"
+    llm._client = __import__("httpx").Client(timeout=1)
+    assert llm.ping() is False
+
+
+def test_groq_requires_api_key():
+    from app.config import settings as _settings
+    from app.llm import GroqError, GroqLLM
+
+    original = _settings.GROQ_API_KEY
+    _settings.GROQ_API_KEY = ""
+    try:
+        with pytest.raises(GroqError):
+            GroqLLM()
+    finally:
+        _settings.GROQ_API_KEY = original
+
+
 def test_answer_endpoint_rejects_empty_question():
     resp = client.post("/answer", json={"question": "   "})
     assert resp.status_code == 422

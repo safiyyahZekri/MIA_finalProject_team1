@@ -26,10 +26,17 @@ class Settings:
     # --- LLM ---
     # "mock"      -> zero-dependency heuristic/regex "LLM" (default, always works)
     # "ollama"    -> real local LLM (e.g. qwen2.5) served by `ollama serve`
+    # "groq"      -> hosted LLM via Groq's fast, OpenAI-compatible API
     # "anthropic" -> real, resource-efficient Claude model via ANTHROPIC_API_KEY
     LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "mock")
     ANTHROPIC_MODEL: str = os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
     ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
+
+    # --- Groq (hosted LLM, OpenAI-compatible) ---
+    GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
+    GROQ_MODEL: str = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+    GROQ_BASE_URL: str = os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
+    GROQ_TIMEOUT_S: float = float(os.getenv("GROQ_TIMEOUT_S", "30"))
 
     # --- Ollama (local LLM) ---
     OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")

@@ -53,6 +53,26 @@ async def health():
                 f"Run `ollama serve` and `ollama pull {settings.OLLAMA_MODEL}`, "
                 "or the graph will fall back to the offline mock heuristic per call."
             )
+    elif settings.LLM_PROVIDER == "groq":
+        from app.llm import GroqError, GroqLLM  # local import: avoid httpx.Client at module load
+
+        if not settings.GROQ_API_KEY:
+            body["status"] = "degraded"
+            body["groq"] = {"reachable": False, "model": settings.GROQ_MODEL}
+            body["hint"] = "GROQ_API_KEY is not set in .env -- get one from https://console.groq.com"
+        else:
+            try:
+                reachable = GroqLLM().ping()
+            except GroqError:
+                reachable = False
+            body["groq"] = {"reachable": reachable, "model": settings.GROQ_MODEL}
+            if not reachable:
+                body["status"] = "degraded"
+                body["hint"] = (
+                    "Can't reach Groq or the API key was rejected. Check GROQ_API_KEY "
+                    "and GROQ_MODEL in .env, or the graph will fall back to the "
+                    "offline mock heuristic per call."
+                )
     return body
 
 

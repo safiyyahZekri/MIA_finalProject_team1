@@ -354,6 +354,182 @@ class OllamaLLM:
             return self._mock.extract(question, question_type, evidence)
 
 
+# ------------------------------------------------------------ groq impl ---
+class GroqError(RuntimeError):
+    pass
+
+
+class GroqLLM:
+    """Hosted LLM via Groq's OpenAI-compatible chat-completions API.
+
+    Same reliability contract as OllamaLLM: every response is requested in
+    JSON mode, validated against the same pydantic schemas used everywhere
+    else, retried once on malformed output, and degraded to MockLLM's
+    heuristic as a last resort rather than ever raising out of the graph.
+    A shared/hosted key means the agent's reasoning no longer depends on
+    any single teammate's machine being on.
+    """
+
+    def __init__(self) -> None:
+        if not settings.GROQ_API_KEY:
+            raise GroqError(
+                "GROQ_API_KEY is not set. Get one from https://console.groq.com "
+                "and set it in .env before using LLM_PROVIDER=groq."
+            )
+        self.base_url = settings.GROQ_BASE_URL.rstrip("/")
+        self.model = settings.GROQ_MODEL
+        self._client = httpx.Client(
+            timeout=settings.GROQ_TIMEOUT_S,
+            headers={
+                "Authorization": f"Bearer {settings.GROQ_API_KEY}",
+                "Content-Type": "application/json",
+            },
+        )
+        self._mock = MockLLM()  # safety net only, not the source of answers
+        self.last_usage: dict = {}
+
+    def ping(self) -> bool:
+        """Best-effort connectivity + key check, used by GET /health."""
+        try:
+            resp = self._client.get(f"{self.base_url}/models", timeout=5)
+            return resp.status_code == 200
+        except httpx.HTTPError:
+            return False
+
+    def _generate(self, prompt: str) -> dict:
+        payload = {
+            "model": self.model,
+            "messages": [{"role": "user", "content": prompt}],
+            "response_format": {"type": "json_object"},
+            "temperature": 0,
+        }
+        last_err: Exception | None = None
+        for attempt in range(2):
+            try:
+                resp = self._client.post(f"{self.base_url}/chat/completions", json=payload)
+                resp.raise_for_status()
+            except httpx.HTTPError as exc:
+                detail = ""
+                if isinstance(exc, httpx.HTTPStatusError):
+                    detail = f" ({exc.response.status_code}: {exc.response.text[:200]})"
+                raise GroqError(
+                    f"Could not reach Groq at {self.base_url} with model "
+                    f"'{self.model}'{detail} -- check GROQ_API_KEY and GROQ_MODEL "
+                    f"in .env: {exc}"
+                ) from exc
+            data = resp.json()
+            usage = data.get("usage", {})
+            self.last_usage = {
+                "prompt_tokens": usage.get("prompt_tokens"),
+                "completion_tokens": usage.get("completion_tokens"),
+            }
+            try:
+                content = data["choices"][0]["message"]["content"]
+                return json.loads(content)
+            except (KeyError, IndexError, json.JSONDecodeError) as exc:
+                last_err = exc
+                payload["messages"] = [
+                    {
+                        "role": "user",
+                        "content": prompt
+                        + f"\n\nYour previous reply was not valid JSON ({exc}). "
+                        "Reply with ONLY the JSON object and nothing else.",
+                    }
+                ]
+        raise GroqError(f"Model returned non-JSON output twice: {last_err}")
+
+    def classify(self, question: str) -> Classification:
+        prompt = (
+            "Classify this financial-document question for retrieval routing.\n"
+            'Return ONLY JSON: {"question_type": "numerical"|"table"|"text", '
+            '"search_query": "<focused retrieval query>"}\n'
+            "- numerical: requires arithmetic (comparison, % change, sum, ratio, sort, etc.)\n"
+            "- table: the answer likely lives in a financial table/line item, no math needed\n"
+            "- text: narrative/prose answer\n\n"
+            f"Question: {question}"
+        )
+        try:
+            return Classification.model_validate(self._generate(prompt))
+        except (GroqError, ValidationError, KeyError, TypeError) as exc:
+            logger.warning("Groq classify() failed, falling back to mock: %s", exc)
+            return self._mock.classify(question)
+
+    def reformulate(self, question: str, previous_query: str, attempt: int) -> str:
+        prompt = (
+            "The previous retrieval query returned insufficient evidence.\n"
+            f"Original question: {question}\nPrevious query: {previous_query}\n"
+            'Return ONLY JSON: {"query": "<one broader or differently phrased retrieval query>"}'
+        )
+        try:
+            return str(self._generate(prompt)["query"])
+        except (GroqError, KeyError, TypeError) as exc:
+            logger.warning("Groq reformulate() failed, falling back to mock: %s", exc)
+            return self._mock.reformulate(question, previous_query, attempt)
+
+    def grade(self, question: str, evidence: List[dict]) -> EvidenceGrade:
+        snippets = "\n---\n".join(
+            f"[{e.get('document_id')} p{e.get('page')} score={e.get('score')}]\n{e.get('text', '')}"
+            for e in evidence
+        ) or "(no evidence retrieved)"
+        prompt = (
+            "Judge whether the evidence below is sufficient to confidently and faithfully "
+            "answer the question. Be strict: if the exact fact/number needed isn't present, "
+            "sufficient must be false.\n"
+            'Return ONLY JSON: {"sufficient": true|false, "confidence": 0.0-1.0, "reason": "<short reason>"}\n\n'
+            f"Question: {question}\n\nEvidence:\n{snippets}"
+        )
+        try:
+            return EvidenceGrade.model_validate(self._generate(prompt))
+        except (GroqError, ValidationError, KeyError, TypeError) as exc:
+            logger.warning("Groq grade() failed, falling back to mock: %s", exc)
+            return self._mock.grade(question, evidence)
+
+    def extract(self, question: str, question_type: str, evidence: List[dict]):
+        snippets = "\n---\n".join(
+            f"[{e.get('document_id')} p{e.get('page')}]\n{e.get('text', '')}" for e in evidence
+        ) or "(no evidence retrieved)"
+
+        if question_type == "numerical":
+            prompt = (
+                "Extract the numeric operands from the evidence needed to answer the question "
+                "and express the calculation as a pure-arithmetic formula using ONLY the literal "
+                "numbers found in the evidence (e.g. '(3875-3410)/3410*100'). Do NOT compute the "
+                "result yourself -- a separate deterministic tool will evaluate the formula.\n"
+                'Return ONLY JSON: {"formula": "<arithmetic expression>", "operand_count": <int>}\n\n'
+                f"Question: {question}\n\nEvidence:\n{snippets}"
+            )
+            try:
+                data = self._generate(prompt)
+                return ExtractionCalculated(
+                    formula=str(data["formula"]), operand_count=int(data["operand_count"])
+                )
+            except (GroqError, KeyError, TypeError, ValueError, ValidationError) as exc:
+                logger.warning("Groq extract(numerical) failed, falling back to mock: %s", exc)
+                return self._mock.extract(question, question_type, evidence)
+
+        prompt = (
+            "Answer the question using ONLY the evidence below. Choose exactly one shape:\n"
+            '- {"shape": "direct", "value": "<single value>"}\n'
+            '- {"shape": "multi_span", "values": ["<value1>", "<value2>", ...]}\n'
+            '- {"shape": "insufficient", "reason": "<why the evidence doesn\'t answer it>"}\n'
+            "Return ONLY one JSON object matching one of the shapes above -- no explanation text.\n\n"
+            f"Question: {question}\n\nEvidence:\n{snippets}"
+        )
+        try:
+            data = self._generate(prompt)
+            shape = data.get("shape")
+            if shape == "direct":
+                return ExtractionDirect(value=str(data["value"]))
+            if shape == "multi_span":
+                return ExtractionMultiSpan(values=[str(v) for v in data["values"]])
+            if shape == "insufficient":
+                return ExtractionInsufficient(reason=str(data.get("reason", "Insufficient evidence.")))
+            raise ValueError(f"Unknown shape '{shape}'")
+        except (GroqError, KeyError, TypeError, ValueError, ValidationError) as exc:
+            logger.warning("Groq extract() failed, falling back to mock: %s", exc)
+            return self._mock.extract(question, question_type, evidence)
+
+
 # --------------------------------------------------------- anthropic impl --
 class AnthropicLLM:
     """Real, resource-efficient Claude model via structured output.
@@ -443,6 +619,8 @@ class AnthropicLLM:
 def get_llm():
     if settings.LLM_PROVIDER == "anthropic":
         return AnthropicLLM()
+    if settings.LLM_PROVIDER == "groq":
+        return GroqLLM()
     if settings.LLM_PROVIDER == "ollama":
         return OllamaLLM()
     return MockLLM()
