@@ -360,6 +360,6 @@ def JSON_Processing(output, pdf_to_image, png_bytes_list, pdf_bytes, table_model
             )
         )
 
-    return DocumentJSON(pages=pages_list, document_id=get_document_id(pdf_bytes),source_doc_uid=uuid.uuid4(),original_filename=original_filename)
+    return DocumentJSON(pages=pages_list, document_id=get_document_id(pdf_bytes), original_filename=original_filename)
 
 
