@@ -94,6 +94,8 @@ def run_pipeline(args: argparse.Namespace) -> dict:
     indexed_chunks = 0
     processed_documents = 0
     skipped_documents = 0
+    duplicate_documents = 0
+    seen_this_run: set[str] = set()
     pending: list[dict] = []
     with httpx.Client(timeout=args.timeout_seconds) as client:
         existing_response = client.get(f"{args.retrieval_url.rstrip('/')}/documents")
@@ -107,6 +109,17 @@ def run_pipeline(args: argparse.Namespace) -> dict:
             pdf_bytes = pdf_path.read_bytes()
             source_doc_uid = identities.get(pdf_path.name)
             document_id = stable_id(pdf_bytes, source_doc_uid)
+            if document_id in seen_this_run:
+                # Byte-identical content under a different filename (the
+                # dataset has real duplicate PDFs across/within splits).
+                # A batch containing two documents with the same id is
+                # rejected outright by retrieval-api, taking the whole
+                # batch down with it -- so skip it here instead, same as
+                # an already-indexed document, since content-addressed
+                # ids mean indexing it once already covers this file too.
+                duplicate_documents += 1
+                skipped_documents += 1
+                continue
             if not args.reindex and document_id in existing:
                 skipped_documents += 1
                 continue
@@ -135,6 +148,7 @@ def run_pipeline(args: argparse.Namespace) -> dict:
                 )
                 continue
             processed_documents += 1
+            seen_this_run.add(document_id)
             pending.append(
                 {
                     "document": processed,
@@ -173,6 +187,7 @@ def run_pipeline(args: argparse.Namespace) -> dict:
         "indexed_documents": indexed_documents,
         "indexed_chunks": indexed_chunks,
         "skipped_documents": skipped_documents,
+        "duplicate_documents": duplicate_documents,
         "errors": errors,
         "ablation_run_id": comparison["run_id"],
         "ablation_comparison_path": comparison.get("comparison_path"),
