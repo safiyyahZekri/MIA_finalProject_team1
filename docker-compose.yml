@@ -65,6 +65,16 @@ services:
     ports:
       - "8005:8005"
 
+  ui-service:
+    build: ./ui-service
+    ports:
+      - "7860:7860"
+    environment:
+      ORCHESTRATOR_URL: http://orchestrator-api:8000
+      MOCK_MODE: "false"
+    depends_on:
+      - orchestrator-api
+
 volumes:
   retrieval-data:
   model-cache:
