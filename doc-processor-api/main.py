@@ -2,6 +2,7 @@ from document_processing import JSON_Processing,PDF_to_Image,OCR_Model,Table_Mod
 from fastapi import FastAPI,File,UploadFile,HTTPException
 app=FastAPI()
 model=OCR_Model()
+table_model = Table_Model()
 @app.get("/")
 def status():
     return{"status":"running"}
@@ -19,7 +20,6 @@ async def document_processor(file:UploadFile=File(...)):
     try:
         pdf_to_image, png_bytes_list = PDF_to_Image().convert(pdf)
         ocr_output = OCR_Model()(pdf_to_image)
-        table_model = Table_Model()
         return JSON_Processing(ocr_output, pdf_to_image, png_bytes_list, pdf, table_model,file.filename)
 
 
