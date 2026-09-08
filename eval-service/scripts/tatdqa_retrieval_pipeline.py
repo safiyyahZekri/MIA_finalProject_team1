@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,9 @@ if str(SERVICE_ROOT) not in sys.path:
     sys.path.insert(0, str(SERVICE_ROOT))
 
 from app.retrieval_benchmark import format_comparison, run_ablation  # noqa: E402
+
+
+TATDQA_SOURCE_UID_PATTERN = re.compile(r"^[0-9a-fA-F]{32}$")
 
 
 def load_json_records(path: Path) -> list[dict]:
@@ -53,6 +57,22 @@ def identity_map(questions: list[dict], manifest: Path | None) -> dict[str, str]
 
 def stable_id(pdf_bytes: bytes, source_doc_uid: str | None) -> str:
     return source_doc_uid or f"sha256-{hashlib.sha256(pdf_bytes).hexdigest()}"
+
+
+def source_doc_uid_for_pdf(pdf_path: Path, identities: dict[str, str]) -> str | None:
+    """Resolve the external TAT-DQA identity without changing generic uploads.
+
+    The official TAT-DQA archives name each PDF ``<source_doc_uid>.pdf``. A
+    supplied/derived manifest remains authoritative for renamed files; the
+    filename fallback is limited to the dataset's 32-character hexadecimal UID
+    shape so arbitrary filenames still use the content-hash fallback.
+    """
+    mapped_uid = identities.get(pdf_path.name)
+    if mapped_uid:
+        return mapped_uid
+    if TATDQA_SOURCE_UID_PATTERN.fullmatch(pdf_path.stem):
+        return pdf_path.stem.lower()
+    return None
 
 
 def flush_batch(
@@ -107,7 +127,7 @@ def run_pipeline(args: argparse.Namespace) -> dict:
 
         for pdf_path in pdfs:
             pdf_bytes = pdf_path.read_bytes()
-            source_doc_uid = identities.get(pdf_path.name)
+            source_doc_uid = source_doc_uid_for_pdf(pdf_path, identities)
             document_id = stable_id(pdf_bytes, source_doc_uid)
             if document_id in seen_this_run:
                 # Byte-identical content under a different filename (the

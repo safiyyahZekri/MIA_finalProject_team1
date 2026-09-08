@@ -227,11 +227,18 @@ python scripts/tatdqa_retrieval_pipeline.py \
   --output-dir results
 ```
 
-The manifest is optional when `gold_evidence` already maps filenames to
-`source_doc_uid`. The runner preserves identity, skips already indexed sources
-unless `--reindex` is supplied, reports OCR/index failures, batch-indexes, then
-runs the four-way unscoped ablation. It uses actual PDFs and the document
-processor—not synthetic processor JSON.
+The official TAT-DQA archives name PDFs `<source_doc_uid>.pdf`, which the runner
+recognizes automatically. A manifest is only needed for renamed PDFs and takes
+precedence over filename inference. The runner preserves identity, skips already
+indexed sources unless `--reindex` is supplied, reports OCR/index failures,
+batch-indexes, then runs the four-way unscoped ablation. It uses actual PDFs and
+the document processor—not synthetic processor JSON.
+
+If an older run indexed this corpus with `sha256-...` document IDs and null
+`source_doc_uid` values, reset that dedicated corpus before rerunning. Otherwise
+the old and corrected identities coexist as duplicate searchable content and
+retrieval metrics cannot be trusted. Corpus deletion is intentionally not done
+automatically by this script.
 
 ### Service tests
 
