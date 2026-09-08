@@ -8,10 +8,15 @@ import hashlib
 import json
 import re
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
 import httpx
+
+# Roughly 3 minutes of backoff (5+10+20+40+60+60s) -- enough to ride out a
+# container restart and its model reload without losing the document.
+OCR_MAX_ATTEMPTS = 7
 
 SERVICE_ROOT = Path(__file__).resolve().parents[1]
 if str(SERVICE_ROOT) not in sys.path:
@@ -83,23 +88,38 @@ def flush_batch(
 ) -> tuple[int, int]:
     if not batch:
         return 0, 0
-    try:
-        response = client.post(
-            f"{retrieval_url.rstrip('/')}/documents/batch",
-            json={"documents": batch},
-        )
-        response.raise_for_status()
-        result = response.json()
-        return int(result["documents_indexed"]), int(result["chunks_indexed"])
-    except Exception as exc:
-        errors.append(
-            {
-                "stage": "retrieval_batch",
-                "documents": [item["document_id"] for item in batch],
-                "error": f"{type(exc).__name__}: {exc}",
-            }
-        )
-        return 0, 0
+    # A failed flush discards up to 32 documents that have already been OCR'd
+    # -- the most expensive work in the pipeline -- so a transient blip is
+    # worth retrying. A 4xx is not transient (the batch itself is malformed,
+    # e.g. duplicate ids) and fails immediately rather than retrying six times.
+    last_error: Exception | None = None
+    for attempt in range(OCR_MAX_ATTEMPTS):
+        try:
+            response = client.post(
+                f"{retrieval_url.rstrip('/')}/documents/batch",
+                json={"documents": batch},
+            )
+            response.raise_for_status()
+            result = response.json()
+            return int(result["documents_indexed"]), int(result["chunks_indexed"])
+        except httpx.HTTPStatusError as exc:
+            last_error = exc
+            if exc.response is not None and 400 <= exc.response.status_code < 500:
+                break
+            if attempt < OCR_MAX_ATTEMPTS - 1:
+                time.sleep(min(5 * (2**attempt), 60))
+        except Exception as exc:
+            last_error = exc
+            if attempt < OCR_MAX_ATTEMPTS - 1:
+                time.sleep(min(5 * (2**attempt), 60))
+    errors.append(
+        {
+            "stage": "retrieval_batch",
+            "documents": [item["document_id"] for item in batch],
+            "error": f"{type(last_error).__name__}: {last_error}",
+        }
+    )
+    return 0, 0
 
 
 def run_pipeline(args: argparse.Namespace) -> dict:
@@ -120,15 +140,23 @@ def run_pipeline(args: argparse.Namespace) -> dict:
     with httpx.Client(timeout=args.timeout_seconds) as client:
         existing_response = client.get(f"{args.retrieval_url.rstrip('/')}/documents")
         existing_response.raise_for_status()
-        existing = {
-            item.get("source_doc_uid") or item.get("document_id")
-            for item in existing_response.json()
-        }
+        # Match on document_id alone. Preferring source_doc_uid here would
+        # compare a uid against the content-hash id computed below and never
+        # agree, so every already-indexed document would be re-processed once
+        # uids started being populated.
+        existing = {item.get("document_id") for item in existing_response.json()}
 
         for pdf_path in pdfs:
             pdf_bytes = pdf_path.read_bytes()
             source_doc_uid = source_doc_uid_for_pdf(pdf_path, identities)
-            document_id = stable_id(pdf_bytes, source_doc_uid)
+            # Keep the id content-addressed even when a uid is available.
+            # Passing the uid to stable_id() would make it the document_id and
+            # silently repoint the corpus: the 1,300+ documents already indexed
+            # by content hash would all look unindexed and be re-OCR'd, and
+            # byte-identical files under different names would stop colliding,
+            # defeating the duplicate detection below. The uid travels
+            # alongside as metadata instead.
+            document_id = stable_id(pdf_bytes, None)
             if document_id in seen_this_run:
                 # Byte-identical content under a different filename (the
                 # dataset has real duplicate PDFs across/within splits).
@@ -146,24 +174,46 @@ def run_pipeline(args: argparse.Namespace) -> dict:
             data = {"document_id": document_id}
             if source_doc_uid:
                 data["source_doc_uid"] = source_doc_uid
-            try:
-                response = client.post(
-                    f"{args.doc_processor_url.rstrip('/')}/document_processing",
-                    data=data,
-                    files={"file": (pdf_path.name, pdf_bytes, "application/pdf")},
-                )
-                response.raise_for_status()
-                processed = response.json()
-                if not isinstance(processed, dict) or not isinstance(
-                    processed.get("pages"), list
-                ):
-                    raise ValueError("processor response is missing pages")
-            except Exception as exc:
+            # Retry instead of giving up on the first failure.
+            #
+            # The OCR service gets restarted during long runs -- it is memory
+            # hungry enough to be OOM-killed, and a watchdog also recycles it
+            # preemptively. Without retries a single ~60s restart is
+            # catastrophic rather than survivable: every remaining document
+            # fails instantly with "Server disconnected" / WinError 10053. One
+            # restart cost 166 documents in a single run, and the script still
+            # exited 0, so the loss looked like a successful run.
+            #
+            # Backing off across a few minutes covers a restart plus its model
+            # reload, and the loop resumes the moment the service answers.
+            processed = None
+            last_error: Exception | None = None
+            for attempt in range(OCR_MAX_ATTEMPTS):
+                try:
+                    response = client.post(
+                        f"{args.doc_processor_url.rstrip('/')}/document_processing",
+                        data=data,
+                        files={"file": (pdf_path.name, pdf_bytes, "application/pdf")},
+                    )
+                    response.raise_for_status()
+                    candidate = response.json()
+                    if not isinstance(candidate, dict) or not isinstance(
+                        candidate.get("pages"), list
+                    ):
+                        raise ValueError("processor response is missing pages")
+                    processed = candidate
+                    break
+                except Exception as exc:
+                    last_error = exc
+                    if attempt < OCR_MAX_ATTEMPTS - 1:
+                        time.sleep(min(5 * (2**attempt), 60))
+            if processed is None:
                 errors.append(
                     {
                         "stage": "document_processor",
                         "filename": pdf_path.name,
-                        "error": f"{type(exc).__name__}: {exc}",
+                        "attempts": OCR_MAX_ATTEMPTS,
+                        "error": f"{type(last_error).__name__}: {last_error}",
                     }
                 )
                 continue

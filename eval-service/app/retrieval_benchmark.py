@@ -9,7 +9,7 @@ import statistics
 import time
 import uuid
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Literal, Protocol
 
 import httpx
@@ -76,12 +76,21 @@ def _gold_identity(evidence: dict, unit: str) -> str | None:
 
 def _hit_identity(hit: dict, unit: str) -> str | None:
     metadata = hit.get("metadata") if isinstance(hit.get("metadata"), dict) else {}
+    # Gold evidence identifies documents by TAT-DQA uid (e.g.
+    # "7d631ffe5ff034d0ea9053d89a327ca3"), and in this corpus that uid is
+    # exactly the PDF's filename stem.
+    #
+    # document_id must therefore be the LAST resort, not the third: it is
+    # always populated (a content hash, "sha256-..."), so checking it before
+    # the filename made the filename branches unreachable and every hit
+    # resolved to a hash that no gold identity can ever equal -- which is
+    # why every recall/precision/MRR figure came out as exactly 0.0000.
+    filename = hit.get("filename") or hit.get("source_filename") or metadata.get("original_filename")
     identity = (
         hit.get("source_doc_uid")
         or metadata.get("source_doc_uid")
+        or (PurePosixPath(str(filename)).stem if filename else None)
         or hit.get("document_id")
-        or hit.get("filename")
-        or hit.get("source_filename")
     )
     if not identity:
         return None

@@ -80,7 +80,7 @@ import json
 import time
 import uuid
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -106,8 +106,34 @@ def _extract_answer_value(answer: dict):
 
 
 def _extract_retrieved_doc_ids(answer: dict) -> List[str]:
+    """Identify retrieved documents the same way the gold data does.
+
+    Gold ids are TAT-DQA uids (`gold_evidence[*].source_doc_uid`), but
+    `document_id` is a content hash (`sha256-...`), so comparing the two
+    directly never matches and every retrieval metric collapses to zero.
+    In this corpus the PDF filename stem is exactly that uid, so fall back
+    through uid -> filename stem -> document_id.
+    """
     evidence = answer.get("evidence", []) if isinstance(answer, dict) else []
-    return [e.get("document_id") for e in evidence if isinstance(e, dict) and e.get("document_id")]
+    ids: List[str] = []
+    for item in evidence:
+        if not isinstance(item, dict):
+            continue
+        metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+        filename = (
+            item.get("filename")
+            or item.get("source_filename")
+            or metadata.get("original_filename")
+        )
+        identity = (
+            item.get("source_doc_uid")
+            or metadata.get("source_doc_uid")
+            or (PurePosixPath(str(filename)).stem if filename else None)
+            or item.get("document_id")
+        )
+        if identity:
+            ids.append(str(identity))
+    return ids
 
 
 def _extract_relevant_doc_ids(record: dict) -> List[str]:
