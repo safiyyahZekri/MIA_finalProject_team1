@@ -88,6 +88,7 @@ import httpx
 from . import metrics as m
 from . import tracing
 from .retrieval_benchmark import load_identity_aliases
+from .semantic_cache import SemanticCache
 
 RESULTS_DIR = Path(__file__).resolve().parent.parent / "results"
 RESULTS_DIR.mkdir(exist_ok=True)
@@ -218,6 +219,11 @@ class BenchmarkConfig:
     # only as an explicit diagnostic mode and must not be used for headline
     # retrieval metrics.
     scope_to_gold_document: bool = False
+    # Opt-in: cache (question, document_id) -> system response within a run,
+    # so repeated or near-duplicate questions don't re-hit system_url. Off by
+    # default so existing callers/tests see unchanged behavior.
+    use_cache: bool = False
+    cache_similarity_threshold: float = 0.85
 
 
 @dataclass
@@ -238,6 +244,7 @@ class QuestionResult:
     question_type: Optional[str] = None
     error: Optional[str] = None
     extra_perf: dict = field(default_factory=dict)
+    cache_hit: Optional[bool] = None
 
     @property
     def is_failure(self) -> bool:
@@ -253,6 +260,7 @@ class QuestionResult:
 def run_benchmark(config: BenchmarkConfig) -> dict:
     run_id = str(uuid.uuid4())
     results: List[QuestionResult] = []
+    cache = SemanticCache(config.cache_similarity_threshold) if config.use_cache else None
 
     with httpx.Client(timeout=config.timeout_s) as client:
         for q in config.questions:
@@ -277,19 +285,29 @@ def run_benchmark(config: BenchmarkConfig) -> dict:
             question_type = None
             perf_extra: dict = {}
             request_payload = {"question": question_text, "document_id": scoping_doc_id}
-            try:
-                resp = client.post(config.system_url, json=request_payload)
-                resp.raise_for_status()
-                body = resp.json()
-                answer_obj, system_trace, question_type = _split_core_answer_and_metadata(
-                    body, config.answer_key
-                )
-                if isinstance(body, dict):
-                    for perf_field in ("llm_calls", "tokens_used", "cost_usd", "retries_used"):
-                        if perf_field in body:
-                            perf_extra[perf_field] = body[perf_field]
-            except Exception as exc:  # network error, bad JSON, non-2xx, etc.
-                error = str(exc)
+
+            cache_hit = False
+            if cache is not None:
+                cache_hit, cached_value = cache.get(question_text, scoping_doc_id)
+                if cache_hit:
+                    answer_obj, system_trace, question_type, perf_extra = cached_value
+
+            if not cache_hit:
+                try:
+                    resp = client.post(config.system_url, json=request_payload)
+                    resp.raise_for_status()
+                    body = resp.json()
+                    answer_obj, system_trace, question_type = _split_core_answer_and_metadata(
+                        body, config.answer_key
+                    )
+                    if isinstance(body, dict):
+                        for perf_field in ("llm_calls", "tokens_used", "cost_usd", "retries_used"):
+                            if perf_field in body:
+                                perf_extra[perf_field] = body[perf_field]
+                    if cache is not None and answer_obj is not None:
+                        cache.set(question_text, scoping_doc_id, (answer_obj, system_trace, question_type, perf_extra))
+                except Exception as exc:  # network error, bad JSON, non-2xx, etc.
+                    error = str(exc)
             latency_ms = (time.perf_counter() - start) * 1000
 
             tracing.log_step(
@@ -298,6 +316,7 @@ def run_benchmark(config: BenchmarkConfig) -> dict:
                 input=request_payload,
                 output=answer_obj if answer_obj is not None else {"error": error},
                 latency_ms=latency_ms,
+                metadata={"cache_hit": cache_hit},
             )
 
             schema_valid = None
@@ -375,6 +394,7 @@ def run_benchmark(config: BenchmarkConfig) -> dict:
                     question_type=question_type,
                     error=error,
                     extra_perf=perf_extra,
+                    cache_hit=cache_hit if cache is not None else None,
                 )
             )
 
@@ -436,6 +456,8 @@ def _summarize(results: List[QuestionResult]) -> dict:
         "avg_retries_used": m.mean(perf_retries),
         "num_failed_examples": len(failed),
         "failed_examples": failed_examples,
+        "cache_hits": sum(1 for r in results if r.cache_hit is True),
+        "cache_misses": sum(1 for r in results if r.cache_hit is False),
     }
 
 
