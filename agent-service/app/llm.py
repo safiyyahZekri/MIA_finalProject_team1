@@ -109,6 +109,38 @@ class ExtractionInsufficient(BaseModel):
     reason: str
 
 
+class ExtractionChoice(BaseModel):
+    """Flat carrier for the three extraction shapes.
+
+    A tool-calling API takes one JSON schema per call, and a bare
+    `Union[...]` is not a schema -- handing one to
+    `with_structured_output()` raises TypeError before any request goes
+    out. A discriminated union works in pydantic but nests `oneOf` inside
+    the tool schema, which providers accept unevenly, so the three shapes
+    are flattened into optional fields here and narrowed back to the
+    concrete models by `as_extraction()`. Callers keep receiving
+    ExtractionDirect / ExtractionMultiSpan / ExtractionInsufficient, so
+    the isinstance branches in app.graph are unaffected.
+    """
+
+    shape: Literal["direct", "multi_span", "insufficient"]
+    value: Optional[str] = None
+    values: Optional[List[str]] = None
+    reason: Optional[str] = None
+
+    def as_extraction(self):
+        if self.shape == "direct" and self.value is not None:
+            return ExtractionDirect(value=str(self.value))
+        if self.shape == "multi_span" and self.values:
+            return ExtractionMultiSpan(values=[str(v) for v in self.values])
+        if self.shape == "insufficient":
+            return ExtractionInsufficient(reason=self.reason or "Insufficient evidence.")
+        # A shape was declared but its payload field came back empty.
+        return ExtractionInsufficient(
+            reason=f"Model returned shape '{self.shape}' without a usable payload."
+        )
+
+
 # ------------------------------------------------------------- mock impl --
 class MockLLM:
     """Deterministic, offline heuristic stand-in for a real LLM."""
@@ -603,17 +635,24 @@ class AnthropicLLM:
                 return ExtractionInsufficient(reason="Could not extract numeric operands.")
 
         # Let the model choose direct vs multi_span vs insufficient.
-        from typing import Union
-        llm = self._base.with_structured_output(
-            Union[ExtractionDirect, ExtractionMultiSpan, ExtractionInsufficient]
-        )
-        return llm.invoke(
-            "Answer the question using ONLY the evidence below. Choose the right shape:\n"
-            "- direct: a single fact/value\n"
-            "- multi_span: two or more distinct values/items\n"
-            "- insufficient: the evidence doesn't contain the answer\n\n"
-            f"Question: {question}\n\nEvidence:\n{snippets}"
-        )
+        llm = self._base.with_structured_output(ExtractionChoice)
+        try:
+            choice = llm.invoke(
+                "Answer the question using ONLY the evidence below. Set shape to "
+                "exactly one of:\n"
+                "- direct: a single fact/value -- fill `value`\n"
+                "- multi_span: two or more distinct values/items -- fill `values`\n"
+                "- insufficient: the evidence doesn't contain the answer -- fill `reason`\n"
+                "Leave the fields belonging to the other shapes unset.\n\n"
+                f"Question: {question}\n\nEvidence:\n{snippets}"
+            )
+        except Exception as exc:  # noqa: BLE001 -- one bad call must not kill a run
+            # Named distinctly so a systemic failure reads as 100 identical
+            # "extraction call failed" reasons in the report rather than as
+            # 100 plausible-looking "insufficient evidence" verdicts.
+            logger.exception("Anthropic extract() failed: %s", exc)
+            return ExtractionInsufficient(reason=f"Extraction call failed: {exc}")
+        return choice.as_extraction()
 
 
 def get_llm():
