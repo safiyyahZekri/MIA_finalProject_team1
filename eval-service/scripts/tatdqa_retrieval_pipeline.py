@@ -140,11 +140,20 @@ def run_pipeline(args: argparse.Namespace) -> dict:
     with httpx.Client(timeout=args.timeout_seconds) as client:
         existing_response = client.get(f"{args.retrieval_url.rstrip('/')}/documents")
         existing_response.raise_for_status()
-        # Match on document_id alone. Preferring source_doc_uid here would
-        # compare a uid against the content-hash id computed below and never
-        # agree, so every already-indexed document would be re-processed once
-        # uids started being populated.
-        existing = {item.get("document_id") for item in existing_response.json()}
+        # Collect BOTH identifiers for every indexed document.
+        #
+        # retrieval-api canonicalises identity server-side: IndexDocumentRequest
+        # .normalize_identity() sets document_id to the source_doc_uid whenever
+        # one is supplied, discarding the content hash the client sent. So a
+        # document can be stored under either scheme depending on whether it
+        # was ingested with a uid, and matching on only one of them silently
+        # fails to recognise the other -- which means re-OCRing documents that
+        # are already indexed, forever, without the run ever converging.
+        existing: set[str] = set()
+        for item in existing_response.json():
+            for key in (item.get("document_id"), item.get("source_doc_uid")):
+                if key:
+                    existing.add(str(key))
 
         for pdf_path in pdfs:
             pdf_bytes = pdf_path.read_bytes()
@@ -168,7 +177,11 @@ def run_pipeline(args: argparse.Namespace) -> dict:
                 duplicate_documents += 1
                 skipped_documents += 1
                 continue
-            if not args.reindex and document_id in existing:
+            # Already indexed under either identity scheme (see above).
+            if not args.reindex and (
+                document_id in existing
+                or (source_doc_uid is not None and source_doc_uid in existing)
+            ):
                 skipped_documents += 1
                 continue
             data = {"document_id": document_id}
