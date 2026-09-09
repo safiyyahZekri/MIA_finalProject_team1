@@ -87,6 +87,7 @@ import httpx
 
 from . import metrics as m
 from . import tracing
+from .retrieval_benchmark import load_identity_aliases
 
 RESULTS_DIR = Path(__file__).resolve().parent.parent / "results"
 RESULTS_DIR.mkdir(exist_ok=True)
@@ -105,7 +106,7 @@ def _extract_answer_value(answer: dict):
     return None
 
 
-def _extract_retrieved_doc_ids(answer: dict) -> List[str]:
+def _extract_retrieved_doc_ids(answer: dict, aliases: Optional[Dict[str, str]] = None) -> List[str]:
     """Identify retrieved documents the same way the gold data does.
 
     Gold ids are TAT-DQA uids (`gold_evidence[*].source_doc_uid`), but
@@ -132,16 +133,28 @@ def _extract_retrieved_doc_ids(answer: dict) -> List[str]:
             or item.get("document_id")
         )
         if identity:
-            ids.append(str(identity))
+            ids.append(_canonical_identity(str(identity), aliases))
     return ids
 
 
-def _extract_relevant_doc_ids(record: dict) -> List[str]:
+def _canonical_identity(identity: str, aliases: Optional[Dict[str, str]] = None) -> str:
+    """Collapse uids that name byte-identical documents onto one identity.
+
+    Only one copy of duplicated content is indexed (under whichever uid was
+    ingested first), so gold naming a different uid for the same bytes would
+    otherwise score a correct retrieval as a miss. Both sides go through this.
+    """
+    if aliases is None:
+        aliases = load_identity_aliases()
+    return aliases.get(identity, identity)
+
+
+def _extract_relevant_doc_ids(record: dict, aliases: Optional[Dict[str, str]] = None) -> List[str]:
     """The real schema has no flat `relevant_document_ids` field — the gold
     document ids live inside `gold_evidence[*].source_doc_uid`."""
     evidence = record.get("gold_evidence") or []
     ids = [e.get("source_doc_uid") for e in evidence if isinstance(e, dict) and e.get("source_doc_uid")]
-    return ids
+    return [_canonical_identity(str(i), aliases) for i in ids]
 
 
 def _extract_scoping_doc_id(record: dict) -> Optional[str]:

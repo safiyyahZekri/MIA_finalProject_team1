@@ -17,6 +17,34 @@ import httpx
 RESULTS_DIR = Path(__file__).resolve().parent.parent / "results"
 KS = (1, 5, 10)
 
+# uid -> canonical uid for documents that are byte-identical. See
+# scripts/build_identity_aliases.py; regenerate it if the corpus changes.
+# Kept beside questions_setA_practice.json rather than under data/, which is
+# gitignored -- teammates need this file or their runs silently score lower.
+IDENTITY_ALIASES_PATH = Path(__file__).resolve().parent.parent / "identity_aliases.json"
+
+
+def load_identity_aliases(path: Path | None = None) -> dict[str, str]:
+    """Load the uid equivalence map, or an empty map if it is absent.
+
+    The corpus contains the same PDF under several uids. Indexing is
+    content-addressed, so only one copy exists -- under whichever uid was
+    ingested first -- while gold evidence may name any of the others.
+    Canonicalising both sides through this map scores such a retrieval as
+    the hit it actually is, without duplicating documents in the index to
+    make the names agree.
+    """
+    target = path or IDENTITY_ALIASES_PATH
+    try:
+        raw = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return {str(k): str(v) for k, v in raw.items()} if isinstance(raw, dict) else {}
+
+
+def _canonical(identity: str, aliases: dict[str, str] | None) -> str:
+    return aliases.get(identity, identity) if aliases else identity
+
 
 class HTTPClient(Protocol):
     def post(self, url: str, json: dict[str, Any]): ...
@@ -51,6 +79,8 @@ class RetrievalBenchmarkConfig:
     scope_to_gold_document: bool = False
     output_dir: Path = field(default_factory=lambda: RESULTS_DIR)
     save_results: bool = True
+    # Defaults to the generated map; pass {} to compare uids verbatim.
+    identity_aliases: dict[str, str] = field(default_factory=load_identity_aliases)
 
 
 def _percentile(values: list[float], percentile: float) -> float | None:
@@ -64,17 +94,22 @@ def _percentile(values: list[float], percentile: float) -> float | None:
     return ordered[lower] * (1 - fraction) + ordered[upper] * fraction
 
 
-def _gold_identity(evidence: dict, unit: str) -> str | None:
+def _gold_identity(
+    evidence: dict, unit: str, aliases: dict[str, str] | None = None
+) -> str | None:
     identity = evidence.get("source_doc_uid") or evidence.get("source_document")
     if not identity:
         return None
+    identity = _canonical(str(identity), aliases)
     if unit == "document_page":
         page = evidence.get("source_page")
         return f"{identity}::page:{page}" if page is not None else None
     return str(identity)
 
 
-def _hit_identity(hit: dict, unit: str) -> str | None:
+def _hit_identity(
+    hit: dict, unit: str, aliases: dict[str, str] | None = None
+) -> str | None:
     metadata = hit.get("metadata") if isinstance(hit.get("metadata"), dict) else {}
     # Gold evidence identifies documents by TAT-DQA uid (e.g.
     # "7d631ffe5ff034d0ea9053d89a327ca3"), and in this corpus that uid is
@@ -94,6 +129,7 @@ def _hit_identity(hit: dict, unit: str) -> str | None:
     )
     if not identity:
         return None
+    identity = _canonical(str(identity), aliases)
     if unit == "document_page":
         page = hit.get("page")
         return f"{identity}::page:{page}" if page is not None else None
@@ -201,7 +237,11 @@ def run_retrieval_benchmark(
             relevant = {
                 identity
                 for evidence in question.get("gold_evidence", []) or []
-                if (identity := _gold_identity(evidence, config.relevance_unit))
+                if (
+                    identity := _gold_identity(
+                        evidence, config.relevance_unit, config.identity_aliases
+                    )
+                )
             }
             payload: dict[str, Any] = {
                 "query": query,
@@ -223,7 +263,7 @@ def run_retrieval_benchmark(
                 body = response.json()
                 retrieved = _ordered_unique(
                     [
-                        _hit_identity(hit, config.relevance_unit)
+                        _hit_identity(hit, config.relevance_unit, config.identity_aliases)
                         for hit in body.get("hits", [])
                         if isinstance(hit, dict)
                     ]
