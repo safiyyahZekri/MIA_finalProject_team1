@@ -1,4 +1,7 @@
 import os
+import uuid
+from datetime import datetime, timezone
+from urllib.parse import quote
 
 import requests
 
@@ -9,6 +12,8 @@ ORCHESTRATOR_URL = os.getenv("ORCHESTRATOR_URL", "http://localhost:8000")
 MOCK_MODE = os.getenv("MOCK_MODE", "true").lower() == "true"
 
 TIMEOUT = 15
+_MOCK_REVIEWS: list[dict] = []
+_MOCK_CORRECTIONS: list[dict] = []
 
 
 def ask(question: str, document_id: str | None = None) -> dict:
@@ -30,6 +35,26 @@ def ask(question: str, document_id: str | None = None) -> dict:
     return resp.json()
 
 
+def ingest_pdf(file_path: str) -> dict:
+    with open(file_path, "rb") as pdf:
+        resp = requests.post(
+            f"{ORCHESTRATOR_URL}/documents/ingest",
+            files={"file": (os.path.basename(file_path), pdf, "application/pdf")},
+            timeout=300,
+        )
+    resp.raise_for_status()
+    return resp.json()
+
+
+def download_document(document_id: str) -> bytes:
+    resp = requests.get(
+        f"{ORCHESTRATOR_URL}/documents/{quote(document_id, safe='')}/file",
+        timeout=TIMEOUT,
+    )
+    resp.raise_for_status()
+    return resp.content
+
+
 def list_documents() -> list[dict]:
     if MOCK_MODE:
         return _mock_documents()
@@ -42,6 +67,128 @@ def recent_queries() -> list[dict]:
     if MOCK_MODE:
         return _mock_recent_queries()
     resp = requests.get(f"{ORCHESTRATOR_URL}/recent_queries", timeout=TIMEOUT)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def submit_review(
+    question: str,
+    original_answer: dict,
+    verdict: str,
+    corrected_answer: str | None = None,
+    comment: str | None = None,
+    document_id: str | None = None,
+) -> dict:
+    payload = {
+        "question": question,
+        "original_answer": original_answer,
+        "verdict": verdict,
+        "corrected_answer": corrected_answer,
+        "comment": comment,
+        "document_id": document_id,
+    }
+    if MOCK_MODE:
+        record = {
+            **payload,
+            "review_id": str(uuid.uuid4()),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "status": "recorded",
+        }
+        _MOCK_REVIEWS.append(record)
+        return record
+    resp = requests.post(f"{ORCHESTRATOR_URL}/reviews", json=payload, timeout=TIMEOUT)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def list_reviews(limit: int = 20) -> list[dict]:
+    if MOCK_MODE:
+        return list(reversed(_MOCK_REVIEWS[-limit:]))
+    resp = requests.get(
+        f"{ORCHESTRATOR_URL}/reviews",
+        params={"limit": limit},
+        timeout=TIMEOUT,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+def get_extracted_fields(document_id: str) -> list[dict]:
+    if MOCK_MODE:
+        return [
+            {
+                "chunk_id": "mock-table-1",
+                "document_id": document_id,
+                "page": 1,
+                "section": "Income Statement",
+                "content_type": "table",
+                "content": "Metric | 2022\nOperating income | 14Z.5 million",
+                "bbox": [80, 120, 920, 430],
+                "source_block_ids": ["mock-block-1"],
+            }
+        ]
+    encoded = quote(document_id, safe="")
+    resp = requests.get(
+        f"{ORCHESTRATOR_URL}/documents/{encoded}/chunks", timeout=TIMEOUT
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+def submit_extraction_correction(
+    document_id: str,
+    chunk_id: str,
+    corrected_text: str,
+    corrected_by: str,
+    comment: str | None = None,
+) -> dict:
+    payload = {
+        "chunk_id": chunk_id,
+        "corrected_text": corrected_text,
+        "corrected_by": corrected_by,
+        "comment": comment,
+    }
+    if MOCK_MODE:
+        original = next(
+            item["content"]
+            for item in get_extracted_fields(document_id)
+            if item["chunk_id"] == chunk_id
+        )
+        record = {
+            **payload,
+            "correction_id": str(uuid.uuid4()),
+            "document_id": document_id,
+            "original_text": original,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "status": "applied",
+        }
+        _MOCK_CORRECTIONS.append(record)
+        return record
+    encoded = quote(document_id, safe="")
+    resp = requests.post(
+        f"{ORCHESTRATOR_URL}/documents/{encoded}/corrections",
+        json=payload,
+        timeout=300,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+def list_extraction_corrections(document_id: str) -> list[dict]:
+    if MOCK_MODE:
+        return list(
+            reversed(
+                [
+                    item
+                    for item in _MOCK_CORRECTIONS
+                    if item["document_id"] == document_id
+                ]
+            )
+        )
+    encoded = quote(document_id, safe="")
+    resp = requests.get(
+        f"{ORCHESTRATOR_URL}/documents/{encoded}/corrections", timeout=TIMEOUT
+    )
     resp.raise_for_status()
     return resp.json()
 

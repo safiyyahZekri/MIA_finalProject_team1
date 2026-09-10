@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from enum import Enum
 from typing import Annotated, Any, Literal
 
@@ -275,6 +276,43 @@ class DocumentSummary(BaseModel):
     chunks: int
     tables: int
     metadata: dict[str, MetadataValue]
+
+
+class ExtractedField(BaseModel):
+    """Editable retrieval representation of one extracted text/table chunk."""
+
+    chunk_id: str
+    document_id: str
+    page: int
+    section: str
+    content_type: Literal["text", "table"]
+    content: str
+    bbox: BBox
+    source_block_ids: list[str]
+
+
+class ExtractionCorrectionRequest(BaseModel):
+    chunk_id: NonEmptyString
+    corrected_text: NonEmptyString = Field(max_length=50000)
+    corrected_by: NonEmptyString = Field(max_length=200)
+    comment: str | None = Field(default=None, max_length=2000)
+
+    @model_validator(mode="after")
+    def normalize_comment(self) -> ExtractionCorrectionRequest:
+        self.comment = self.comment.strip() if self.comment else None
+        return self
+
+
+class ExtractionCorrectionRecord(BaseModel):
+    correction_id: str
+    document_id: str
+    chunk_id: str
+    original_text: str
+    corrected_text: str
+    corrected_by: str
+    comment: str | None = None
+    created_at: datetime
+    status: Literal["applied"] = "applied"
 
 
 class CorpusStats(BaseModel):

@@ -4,14 +4,14 @@ import hashlib
 
 from fastapi.testclient import TestClient
 
-from app import clients
+from app import clients, document_store
 from app.main import app
 
 
 PDF_BYTES = b"%PDF-1.4\n% retrieval integration fixture\n%%EOF"
 
 
-def test_pdf_is_processed_indexed_and_identity_is_preserved(monkeypatch) -> None:
+def test_pdf_is_processed_indexed_and_identity_is_preserved(monkeypatch, tmp_path) -> None:
     captured = {}
 
     async def fake_process(content, filename, document_id, source_doc_uid):
@@ -41,6 +41,7 @@ def test_pdf_is_processed_indexed_and_identity_is_preserved(monkeypatch) -> None
 
     monkeypatch.setattr(clients, "process_pdf", fake_process)
     monkeypatch.setattr(clients, "index_processed_document", fake_index)
+    monkeypatch.setenv("DOCUMENT_STORE_DIR", str(tmp_path))
     response = TestClient(app).post(
         "/documents/ingest",
         files={"file": ("report.pdf", PDF_BYTES, "application/pdf")},
@@ -55,9 +56,30 @@ def test_pdf_is_processed_indexed_and_identity_is_preserved(monkeypatch) -> None
     assert response.json()["status"] == "indexed"
     assert captured["processor"][2:] == ("tatdqa-123", "tatdqa-123")
     assert captured["index"][4]["original_filename"] == "report.pdf"
+    assert document_store.pdf_path("tatdqa-123").read_bytes() == PDF_BYTES
 
 
-def test_generic_upload_uses_stable_content_hash(monkeypatch) -> None:
+def test_stored_source_pdf_can_be_downloaded(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("DOCUMENT_STORE_DIR", str(tmp_path))
+    document_store.save_pdf("report-id", PDF_BYTES)
+
+    response = TestClient(app).get("/documents/report-id/file")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/pdf"
+    assert response.content == PDF_BYTES
+
+
+def test_missing_source_pdf_returns_structured_404(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("DOCUMENT_STORE_DIR", str(tmp_path))
+
+    response = TestClient(app).get("/documents/not-indexed/file")
+
+    assert response.status_code == 404
+    assert response.json()["detail"]["code"] == "source_pdf_not_found"
+
+
+def test_generic_upload_uses_stable_content_hash(monkeypatch, tmp_path) -> None:
     identities = []
 
     async def fake_process(content, filename, document_id, source_doc_uid):
@@ -76,6 +98,7 @@ def test_generic_upload_uses_stable_content_hash(monkeypatch) -> None:
 
     monkeypatch.setattr(clients, "process_pdf", fake_process)
     monkeypatch.setattr(clients, "index_processed_document", fake_index)
+    monkeypatch.setenv("DOCUMENT_STORE_DIR", str(tmp_path))
     client = TestClient(app)
     first = client.post(
         "/documents/ingest",
@@ -92,7 +115,7 @@ def test_generic_upload_uses_stable_content_hash(monkeypatch) -> None:
     assert second.json()["status"] == "reindexed"
 
 
-def test_blank_source_uid_falls_back_to_stable_hash(monkeypatch) -> None:
+def test_blank_source_uid_falls_back_to_stable_hash(monkeypatch, tmp_path) -> None:
     captured = {}
 
     async def fake_process(content, filename, document_id, source_doc_uid):
@@ -107,6 +130,7 @@ def test_blank_source_uid_falls_back_to_stable_hash(monkeypatch) -> None:
 
     monkeypatch.setattr(clients, "process_pdf", fake_process)
     monkeypatch.setattr(clients, "index_processed_document", fake_index)
+    monkeypatch.setenv("DOCUMENT_STORE_DIR", str(tmp_path))
     response = TestClient(app).post(
         "/documents/ingest",
         files={"file": ("report.pdf", PDF_BYTES, "application/pdf")},

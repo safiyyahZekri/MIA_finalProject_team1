@@ -10,6 +10,7 @@ services:
       AGENT_SERVICE_URL: http://agent-service:8003
       VALIDATOR_SERVICE_URL: http://answer-validator-api:8004
       DOCUMENT_STORE_DIR: /data/documents
+      REVIEW_STORE_PATH: /data/documents/reviews.jsonl
     volumes:
       - source-documents:/data/documents
     healthcheck:

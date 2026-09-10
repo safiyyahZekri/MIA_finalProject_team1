@@ -10,6 +10,9 @@ from .models import (
     BatchIndexResponse,
     CorpusStats,
     DocumentSummary,
+    ExtractedField,
+    ExtractionCorrectionRecord,
+    ExtractionCorrectionRequest,
     FilterRequest,
     IndexDocumentRequest,
     IndexResponse,
@@ -128,6 +131,59 @@ def create_app(
                 detail={"code": "document_not_found", "message": "document not found"},
             )
         return {"document_id": document_id, "chunks_removed": removed}
+
+    @application.get(
+        "/documents/{document_id}/chunks", response_model=list[ExtractedField]
+    )
+    def document_chunks(document_id: str, request: Request) -> list[ExtractedField]:
+        try:
+            return request.app.state.engine.document_chunks(document_id)
+        except KeyError as exc:
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "document_not_found", "message": str(exc.args[0])},
+            ) from exc
+
+    @application.post(
+        "/documents/{document_id}/corrections",
+        response_model=ExtractionCorrectionRecord,
+    )
+    def correct_extracted_field(
+        document_id: str,
+        payload: ExtractionCorrectionRequest,
+        request: Request,
+    ) -> ExtractionCorrectionRecord:
+        try:
+            return request.app.state.engine.correct_extracted_field(document_id, payload)
+        except KeyError as exc:
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "extracted_field_not_found", "message": str(exc.args[0])},
+            ) from exc
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "invalid_correction", "message": str(exc)},
+            ) from exc
+        except (RuntimeError, OSError) as exc:
+            raise _service_error(exc) from exc
+
+    @application.get(
+        "/documents/{document_id}/corrections",
+        response_model=list[ExtractionCorrectionRecord],
+    )
+    def extraction_corrections(
+        document_id: str, request: Request
+    ) -> list[ExtractionCorrectionRecord]:
+        try:
+            return request.app.state.engine.corrections(document_id)
+        except KeyError as exc:
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "document_not_found", "message": str(exc.args[0])},
+            ) from exc
+        except (RuntimeError, OSError) as exc:
+            raise _service_error(exc) from exc
 
     def execute_search(payload: SearchRequest, request: Request) -> SearchResponse:
         try:

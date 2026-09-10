@@ -1,7 +1,10 @@
+import logging
 import os
 from typing import Any
 
 import httpx
+
+logger = logging.getLogger("orchestrator")
 
 AGENT_SERVICE_URL = os.getenv("AGENT_SERVICE_URL", "http://localhost:8003")
 VALIDATOR_SERVICE_URL = os.getenv("VALIDATOR_SERVICE_URL", "http://localhost:8004")
@@ -143,6 +146,91 @@ async def list_documents() -> list[dict]:
         resp = await client.get(f"{RETRIEVAL_SERVICE_URL}/documents")
         resp.raise_for_status()
         return resp.json()
+
+
+async def get_extracted_fields(document_id: str) -> list[dict]:
+    try:
+        async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+            response = await client.get(
+                f"{RETRIEVAL_SERVICE_URL}/documents/{document_id}/chunks"
+            )
+    except httpx.HTTPError as exc:
+        raise ServiceIntegrationError("retrieval_correction", str(exc)) from exc
+    if response.is_error:
+        raise ServiceIntegrationError(
+            "retrieval_correction", _error_message(response), response.status_code
+        )
+    return response.json()
+
+
+async def evidence_boxes(evidence: list[dict]) -> list[dict]:
+    """Bounding boxes for the cited pages, returned beside the answer.
+
+    Citations keep the Strict Answer Schema (document_id, page, section), so
+    the boxes are looked up from the cited documents' indexed chunks: every
+    chunk on a cited page, narrowed to the cited section when there is one.
+    A lookup that fails leaves the answer without boxes instead of failing it.
+    """
+    if MOCK_MODE or not evidence:
+        return []
+    chunks_by_document: dict[str, list[dict]] = {}
+    boxes: list[dict] = []
+    seen: set[tuple] = set()
+    for citation in evidence:
+        document_id = citation.get("document_id")
+        if document_id not in chunks_by_document:
+            try:
+                chunks_by_document[document_id] = await get_extracted_fields(document_id)
+            except (ServiceIntegrationError, ValueError) as exc:
+                logger.warning("evidence boxes unavailable for %s: %s", document_id, exc)
+                chunks_by_document[document_id] = []
+        for chunk in chunks_by_document[document_id]:
+            if chunk.get("page") != citation.get("page") or not chunk.get("bbox"):
+                continue
+            if citation.get("section") and chunk.get("section") != citation.get("section"):
+                continue
+            key = (document_id, chunk["page"], tuple(chunk["bbox"]))
+            if key in seen:
+                continue
+            seen.add(key)
+            boxes.append({
+                "document_id": document_id,
+                "page": chunk["page"],
+                "section": chunk.get("section"),
+                "bbox": list(chunk["bbox"]),
+            })
+    return boxes
+
+
+async def apply_extraction_correction(document_id: str, payload: dict) -> dict:
+    try:
+        async with httpx.AsyncClient(timeout=RETRIEVAL_INDEX_TIMEOUT) as client:
+            response = await client.post(
+                f"{RETRIEVAL_SERVICE_URL}/documents/{document_id}/corrections",
+                json=payload,
+            )
+    except httpx.HTTPError as exc:
+        raise ServiceIntegrationError("retrieval_correction", str(exc)) from exc
+    if response.is_error:
+        raise ServiceIntegrationError(
+            "retrieval_correction", _error_message(response), response.status_code
+        )
+    return response.json()
+
+
+async def list_extraction_corrections(document_id: str) -> list[dict]:
+    try:
+        async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+            response = await client.get(
+                f"{RETRIEVAL_SERVICE_URL}/documents/{document_id}/corrections"
+            )
+    except httpx.HTTPError as exc:
+        raise ServiceIntegrationError("retrieval_correction", str(exc)) from exc
+    if response.is_error:
+        raise ServiceIntegrationError(
+            "retrieval_correction", _error_message(response), response.status_code
+        )
+    return response.json()
 
 
 def _mock_agent_answer(question: str) -> dict:

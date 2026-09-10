@@ -1,2 +1,4 @@
-gradio
+gradio>=5.0,<6.0
 requests
+PyMuPDF
+Pillow

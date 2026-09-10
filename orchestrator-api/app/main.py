@@ -1,14 +1,24 @@
-import logging
 import hashlib
 import json
+import logging
 import time
 from typing import Annotated
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 
-from app import clients
-from app.schemas import AskRequest, AskResponse, IngestResponse
+from app import clients, document_store, review_store
+from app.schemas import (
+    AskRequest,
+    AskResponse,
+    ExtractedField,
+    ExtractionCorrectionRecord,
+    ExtractionCorrectionRequest,
+    IngestResponse,
+    ReviewRecord,
+    ReviewRequest,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("orchestrator")
@@ -91,6 +101,18 @@ async def ingest_document(
             },
         ) from exc
 
+    try:
+        document_store.save_pdf(document_id, content)
+    except OSError as exc:
+        logger.exception("indexed PDF could not be saved for evidence rendering")
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "document_storage_failed",
+                "message": "document was indexed but its source PDF could not be stored",
+            },
+        ) from exc
+
     replaced = int(indexed.get("chunks_replaced", 0))
     return IngestResponse(
         document_id=document_id,
@@ -131,6 +153,7 @@ async def ask(request: AskRequest):
         params=answer["params"],
         valid=validation["valid"],
         validator_message=validation["reason"],
+        evidence_boxes=await clients.evidence_boxes(answer["evidence"]),
     )
 
 
@@ -139,6 +162,110 @@ async def documents():
     return await clients.list_documents()
 
 
+def _correction_error(exc: clients.ServiceIntegrationError) -> HTTPException:
+    status_code = exc.status_code if exc.status_code in {404, 422} else 502
+    return HTTPException(
+        status_code=status_code,
+        detail={
+            "code": f"{exc.stage}_failed",
+            "message": str(exc),
+            "upstream_status": exc.status_code,
+        },
+    )
+
+
+@app.get("/documents/{document_id}/chunks", response_model=list[ExtractedField])
+async def extracted_fields(document_id: str):
+    try:
+        return await clients.get_extracted_fields(document_id)
+    except clients.ServiceIntegrationError as exc:
+        raise _correction_error(exc) from exc
+
+
+@app.post(
+    "/documents/{document_id}/corrections",
+    response_model=ExtractionCorrectionRecord,
+)
+async def correct_extracted_field(
+    document_id: str, correction: ExtractionCorrectionRequest
+):
+    try:
+        return await clients.apply_extraction_correction(
+            document_id, correction.model_dump()
+        )
+    except clients.ServiceIntegrationError as exc:
+        raise _correction_error(exc) from exc
+
+
+@app.get(
+    "/documents/{document_id}/corrections",
+    response_model=list[ExtractionCorrectionRecord],
+)
+async def extraction_corrections(document_id: str):
+    try:
+        return await clients.list_extraction_corrections(document_id)
+    except clients.ServiceIntegrationError as exc:
+        raise _correction_error(exc) from exc
+
+
+@app.get("/documents/{document_id:path}/file", response_class=FileResponse)
+async def document_file(document_id: str):
+    """Return the original PDF used for indexing and evidence highlighting."""
+    path = document_store.pdf_path(document_id)
+    if not path.is_file():
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "source_pdf_not_found",
+                "message": "source PDF is not available on this orchestrator",
+            },
+        )
+    return FileResponse(
+        path,
+        media_type="application/pdf",
+        filename=path.name,
+        content_disposition_type="inline",
+    )
+
+
 @app.get("/recent_queries")
 async def get_recent_queries():
     return recent_queries[-20:]
+
+
+@app.post("/reviews", response_model=ReviewRecord)
+async def create_review(review: ReviewRequest):
+    """Persist human feedback without changing the validated system answer."""
+    try:
+        record = review_store.record_review(review)
+    except OSError as exc:
+        logger.exception("human review could not be stored")
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "review_storage_failed",
+                "message": "the review could not be stored",
+            },
+        ) from exc
+    logger.info(
+        "[HUMAN-REVIEW] review_id=%s verdict=%s question=%r",
+        record.review_id,
+        record.verdict,
+        record.question,
+    )
+    return record
+
+
+@app.get("/reviews", response_model=list[ReviewRecord])
+async def get_reviews(limit: int = Query(default=20, ge=1, le=100)):
+    try:
+        return review_store.list_reviews(limit)
+    except (OSError, ValueError) as exc:
+        logger.exception("stored human reviews could not be read")
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "review_storage_invalid",
+                "message": "stored reviews could not be read",
+            },
+        ) from exc

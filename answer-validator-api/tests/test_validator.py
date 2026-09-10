@@ -41,6 +41,25 @@ def test_direct_example_is_valid():
     assert "'direct'" in out.log_line
 
 
+def test_evidence_bounding_box_is_rejected():
+    """The Strict Answer Schema allows only document_id, page and section per
+    citation. Highlight coordinates travel beside the answer instead, in the
+    orchestrator's evidence_boxes field."""
+    answer = {
+        **DIRECT_OK,
+        "evidence": [
+            {
+                "document_id": "doc_017",
+                "page": 1,
+                "section": "Income Statement",
+                "bbox": [10, 20, 500, 180],
+            }
+        ],
+    }
+
+    assert validate_answer(answer).valid is False
+
+
 def test_calculated_example_is_valid():
     out = validate_answer(CALCULATED_OK)
     assert out.valid is True
