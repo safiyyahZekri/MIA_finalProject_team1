@@ -12,6 +12,9 @@ ORCHESTRATOR_URL = os.getenv("ORCHESTRATOR_URL", "http://localhost:8000")
 MOCK_MODE = os.getenv("MOCK_MODE", "true").lower() == "true"
 
 TIMEOUT = 15
+# Answering runs the whole agent loop, which takes 30 s to a few minutes; this
+# stays above orchestrator-api's own AGENT_TIMEOUT_SECONDS (600).
+ASK_TIMEOUT = float(os.getenv("ASK_TIMEOUT_SECONDS", "660"))
 _MOCK_REVIEWS: list[dict] = []
 _MOCK_CORRECTIONS: list[dict] = []
 
@@ -22,7 +25,7 @@ def ask(question: str, document_id: str | None = None) -> dict:
     resp = requests.post(
         f"{ORCHESTRATOR_URL}/ask",
         json={"question": question, "document_id": document_id},
-        timeout=TIMEOUT,
+        timeout=ASK_TIMEOUT,
     )
     if resp.status_code == 422:
         return {

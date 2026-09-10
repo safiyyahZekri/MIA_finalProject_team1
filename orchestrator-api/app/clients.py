@@ -17,6 +17,9 @@ RETRIEVAL_SERVICE_URL = os.getenv("RETRIEVAL_SERVICE_URL", "http://localhost:800
 MOCK_MODE = os.getenv("MOCK_MODE", "true").lower() == "true"
 
 TIMEOUT = float(os.getenv("SERVICE_TIMEOUT_SECONDS", "15"))
+# A real agent run retrieves, grades and retries with several model calls,
+# which takes 30 s to a few minutes; 15 s cut off almost every answer.
+AGENT_TIMEOUT = float(os.getenv("AGENT_TIMEOUT_SECONDS", "600"))
 DOC_PROCESSOR_TIMEOUT = float(os.getenv("DOC_PROCESSOR_TIMEOUT_SECONDS", "300"))
 RETRIEVAL_INDEX_TIMEOUT = float(os.getenv("RETRIEVAL_INDEX_TIMEOUT_SECONDS", "300"))
 
@@ -121,7 +124,7 @@ async def index_processed_document(
 async def ask_agent(question: str, document_id: str | None = None) -> dict:
     if MOCK_MODE:
         return _mock_agent_answer(question)
-    async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+    async with httpx.AsyncClient(timeout=AGENT_TIMEOUT) as client:
         resp = await client.post(
             f"{AGENT_SERVICE_URL}/agent/query",
             json={"question": question, "document_id": document_id},
