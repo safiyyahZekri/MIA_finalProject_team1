@@ -131,6 +131,110 @@ accepts but which hides the figures the count rests on. Supporting comparisons
 
 The six experiment runs cost $3.87 in total.
 
+## Full practice set: 100 questions
+
+Run `full-100-v1` used the adopted setup, D1: top 5 chunks, company-match
+grading, and citations named by the model. It crashed at question 40 on a
+console encoding error. It was resumed from the saved batches, after `/health`
+confirmed the agent's configuration was unchanged (fixed in `2cc1d20`). All 100
+questions were answered, with 0 errors and 100/100 schema-valid responses.
+
+| metric | value |
+|---|---|
+| exact match | 0.25 |
+| F1 | 0.35 |
+| numerical accuracy | 0.64: 7 of the 11 answers where both answer and gold are numbers. Over all 42 numeric-gold questions, counting abstentions as wrong: 0.17 |
+| retrieval over cited evidence, k=5 | recall 0.337 · precision 0.305 · hit rate 0.337 · MRR 0.326 |
+| latency | mean 29.4 s · p50 30.2 s · p95 51.2 s |
+| LLM calls per question | 4.97, with 1.26 grading retries on average |
+| tokens per question | 7,683 input / 934 output |
+| cost | $6.18 total, $0.062 per question |
+
+| outcome | C | U | F | A | W | E | fallback citations |
+|---|---|---|---|---|---|---|---|
+| all 100 | 26 | 1 | 7 | 52 | 14 | 0 | 0 |
+
+| answer type | n | EM | C | U | F | A | W |
+|---|---|---|---|---|---|---|---|
+| arithmetic | 40 | 0.12 | 6 | 1 | 0 | 29 | 4 |
+| span | 40 | 0.20 | 8 | 0 | 7 | 18 | 7 |
+| multi-span | 13 | 0.54 | 7 | 0 | 0 | 3 | 3 |
+| count | 2 | 0.00 | 0 | 0 | 0 | 2 | 0 |
+| unanswerable | 5 | 1.00 | 5 | 0 | 0 | 0 | 0 |
+
+The weakest scenario is cross-document questions: 8 questions, 0 C, 1 U and
+7 A. EM is lower than on the 10-question sample (D1: 0.50) because that sample
+was stratified, and 2 of its 10 questions were unanswerable, against 5 of 100
+here.
+
+**7. Most declines are retrieval misses.** 95 questions are answerable; the
+agent declined 52 and answered 43. The gold document appeared in retrieval, at
+any attempt, for 57 of the 95. In the 38 questions where it never appeared,
+the agent declined 33 times rather than answer from the wrong document. It
+declined 19 questions even though the gold document was retrieved. By a keyword
+heuristic over the grader's reasons, which makes the count approximate, 11 of
+those 19 cite company identity: A001, A022, A032, A035, A040, A041, A051, A052,
+A069, A079 and A094. That is the cost described in finding 3.
+
+The retrieval scores above are computed over cited evidence. A declined answer
+cites nothing, so it scores as a miss: the hit rate is 0.34, while gold was
+retrieved for 60% of questions. Better retrieval would move this system more
+than anything else, for example queries that carry the company name, or
+filtering by company.
+
+**8. When the agent answers, it is mostly right.** Of the 43 answerable
+questions it answered, 29 have the right content (C 21, U 1, F 7). Reading the
+14 wrong answers by hand, 6 are right in substance but scored wrong:
+
+- A096 gives `0.105675` against gold `0.11`. The gold is rounded to two
+  decimals, and the scorer allows 1% relative error.
+- A014 gives `31.27`, in millions, against `31,252` thousand. The operands came
+  from rounded figures in the narrative text.
+- A086 gives `["$12.2", "$23.6", "$38.6"]` without "million". The source breaks
+  the line between "$38.6" and "million", and the format fix asks for no units
+  outside the span.
+- A049 answers `IBM` for "International Business Machines Corporation".
+- A043 gives a shorter span of the gold sentence (F1 0.72, under the 0.8 used
+  for F).
+- A013 has the right reason, plus `"p1"` appended as a value because the
+  question asks for a page.
+
+The other 8 are genuinely wrong:
+
+- A007 averaged three year-on-year changes instead of two.
+- A011 gave an absolute change where the gold is a percentage.
+- A038 and A077 used the wrong figures.
+- A050 and A067 gave a different explanation.
+- A037 and A068 returned incomplete lists.
+
+The scorer was not changed after seeing these results. Rounding to the gold's
+precision, and matching company aliases, should be agreed on first and then
+applied to every run.
+
+**9. The one U is a judge limitation, not a bad citation.** A018 computed
+Jabil's and Advanced Energy's 2018 gross profit from quarterly tables. All
+eight operands were confirmed in the two filings it cited. The judge looks for
+the annual totals held in the gold documents, which are different filings.
+Every citation in the run was named by the model, and none fell back to
+top-ranked hits.
+
+| trace | shows |
+|---|---|
+| [A096](https://cloud.langfuse.com/project/cmtv69p2f070wad0dt27on2ut/traces/da6a4de4c1ba9bca2aebf446c65eb25a) | correct calculation, scored wrong on rounding |
+| [A086](https://cloud.langfuse.com/project/cmtv69p2f070wad0dt27on2ut/traces/ed7dacd4a1bce7ed1af4d36f1a47747c) | "million" dropped from the span |
+| [A018](https://cloud.langfuse.com/project/cmtv69p2f070wad0dt27on2ut/traces/0ed2c4df2434e528614afae8ea56269f) | correct, cited to quarterly tables the judge does not recognise |
+| [A003](https://cloud.langfuse.com/project/cmtv69p2f070wad0dt27on2ut/traces/9854b215415dc06783d8eb0b92962cee) | gold document never retrieved, declined |
+
+To rerun it, from `eval-service/`, with agent-service on the default settings:
+
+```bash
+python scripts/run_answer_eval.py --all --timeout 600 --label full-100-v1 \
+    --out-dir results/answer-eval/full-100-v1
+# after an interruption, continue from the saved batches:
+python scripts/run_answer_eval.py --all --resume --timeout 600 --label full-100-v1 \
+    --out-dir results/answer-eval/full-100-v1
+```
+
 ## Reproducing
 
 From the repository root, start agent-service with the run's settings, for
