@@ -6,18 +6,21 @@ time and saves each batch's full per-question report on the host. The
 eval-service container keeps reports only in its own filesystem, so without
 this they are lost on the next rebuild.
 
-Built for a rate-limited API key:
+Built for a long run on a rate-limited API key:
   * batches are small and run back to back, so a failure costs one batch;
-  * --delay spaces questions out to stay under a per-minute token limit;
-  * --retry-errors re-runs only the questions that errored and replaces
-    their rows in the combined report instead of duplicating them;
-  * the summary prints measured input tokens per minute, the figure to
-    compare against the key's limit.
+  * every batch report is written, and folded into the combined report,
+    before anything is printed -- a crash cannot lose an answered question,
+    and the next invocation folds any stray batch file back in;
+  * --resume skips questions already answered in the output directory;
+  * --retry-errors re-runs only the questions that errored;
+  * --delay spaces questions out to stay under a per-minute token limit, and
+    the summary prints measured input tokens per minute to size it.
 
 Examples, from eval-service/:
   python scripts/run_answer_eval.py --sample 10
   python scripts/run_answer_eval.py --ids A001,A011
-  python scripts/run_answer_eval.py --all --batch-size 10 --delay 15
+  python scripts/run_answer_eval.py --all --batch-size 5 --delay 15
+  python scripts/run_answer_eval.py --all --resume --dry-run
   python scripts/run_answer_eval.py --retry-errors
 """
 
@@ -25,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 import time
 from collections import defaultdict
 from pathlib import Path
@@ -52,25 +56,52 @@ def stratified_sample(questions: list[dict], n: int) -> list[dict]:
     return picked
 
 
-def select_questions(args, questions: list[dict], combined_path: Path) -> list[dict]:
+def load_saved_rows(out_dir: Path) -> dict[str, dict]:
+    """Every result already on disk, keyed by question id.
+
+    The combined report is rebuilt from the batch reports as well, so a batch
+    written just before a crash is not lost. Batches are applied oldest first,
+    so a re-run question replaces its earlier row.
+    """
+    rows: dict[str, dict] = {}
+    combined = out_dir / "combined.json"
+    if combined.exists():
+        for row in json.loads(combined.read_text(encoding="utf-8"))["results"]:
+            rows[row["question_id"]] = row
+    for path in sorted(out_dir.glob("batch-*.json"), key=lambda p: p.stat().st_mtime):
+        report = json.loads(path.read_text(encoding="utf-8"))
+        for row in report["results"]:
+            rows[row["question_id"]] = {**row, "run_id": report["run_id"]}
+    return rows
+
+
+def write_combined(path: Path, rows: dict[str, dict], questions: list[dict]) -> None:
+    ordered = [rows[q["question_id"]] for q in questions if q["question_id"] in rows]
+    path.write_text(json.dumps({"results": ordered}, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def select_questions(args, questions: list[dict], rows: dict[str, dict]) -> list[dict]:
     by_id = {q["question_id"]: q for q in questions}
     if args.sample:
-        return stratified_sample(questions, args.sample)
-    if args.all:
-        return questions
-    if args.retry_errors:
-        if not combined_path.exists():
-            raise SystemExit(f"nothing to retry: {combined_path} does not exist")
-        combined = json.loads(combined_path.read_text(encoding="utf-8"))
-        ids = [r["question_id"] for r in combined["results"] if r.get("error")]
-        if not ids:
-            raise SystemExit("no errored questions in the combined report")
+        selected = stratified_sample(questions, args.sample)
+    elif args.all:
+        selected = list(questions)
     else:
-        ids = [i.strip() for i in args.ids.split(",") if i.strip()]
-    unknown = [i for i in ids if i not in by_id]
-    if unknown:
-        raise SystemExit(f"unknown question ids: {', '.join(unknown)}")
-    return [by_id[i] for i in ids]
+        if args.retry_errors:
+            ids = [qid for qid, row in rows.items() if row.get("error")]
+            if not ids:
+                raise SystemExit("no errored questions in the saved results")
+        else:
+            ids = [i.strip() for i in args.ids.split(",") if i.strip()]
+        unknown = [i for i in ids if i not in by_id]
+        if unknown:
+            raise SystemExit(f"unknown question ids: {', '.join(unknown)}")
+        selected = [by_id[i] for i in ids]
+    if args.resume:
+        selected = [
+            q for q in selected if not (q["question_id"] in rows and not rows[q["question_id"]].get("error"))
+        ]
+    return selected
 
 
 def run_batch(args, batch: list[dict]) -> dict:
@@ -102,6 +133,7 @@ def _value(answer: dict | None):
 
 def _short(value, width: int) -> str:
     text = json.dumps(value, ensure_ascii=False) if not isinstance(value, str) else value
+    text = " ".join(text.split())
     return text if len(text) <= width else text[: width - 3] + "..."
 
 
@@ -162,12 +194,20 @@ def print_summary(rows: list[dict], types: dict[str, str], ran: list[dict], elap
 
 
 def main() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        # Redirected output on Windows defaults to cp1252: one "≤" in a gold
+        # answer raised UnicodeEncodeError and stopped a 100-question run.
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     which = parser.add_mutually_exclusive_group(required=True)
     which.add_argument("--sample", type=int, help="N questions, stratified across answer types")
     which.add_argument("--ids", help="comma-separated question ids, e.g. A001,A011")
     which.add_argument("--all", action="store_true", help="all 100 practice questions")
-    which.add_argument("--retry-errors", action="store_true", help="re-run errored rows of the combined report")
+    which.add_argument("--retry-errors", action="store_true", help="re-run errored rows of the saved results")
+    parser.add_argument("--resume", action="store_true", help="skip questions already answered in --out-dir")
+    parser.add_argument("--dry-run", action="store_true", help="print what would run, call nothing")
     parser.add_argument("--batch-size", type=int, default=5)
     parser.add_argument("--delay", type=float, default=0.0, help="seconds between questions")
     parser.add_argument("--timeout", type=float, default=300.0, help="seconds allowed per question")
@@ -185,36 +225,39 @@ def main() -> None:
     args.out_dir.mkdir(parents=True, exist_ok=True)
     combined_path = args.out_dir / "combined.json"
 
-    selected = select_questions(args, questions, combined_path)
+    rows = load_saved_rows(args.out_dir)
+    selected = select_questions(args, questions, rows)
     batches = [selected[i : i + args.batch_size] for i in range(0, len(selected), args.batch_size)]
-    print(f"{len(selected)} questions in {len(batches)} batch(es); delay {args.delay}s, timeout {args.timeout}s")
+    print(f"{len(rows)} results already saved; {len(selected)} questions to run in {len(batches)} batch(es); "
+          f"delay {args.delay}s, timeout {args.timeout}s")
+    if args.dry_run:
+        print("would run:", ", ".join(q["question_id"] for q in selected) or "(nothing)")
+        return
+    # Fold any batch written before an interruption into the combined report now.
+    write_combined(combined_path, rows, questions)
 
     # Record what actually ran, so a comparison between runs can't silently
-    # mix configurations.
+    # mix configurations. A resumed run is appended, not overwritten.
     try:
         agent = httpx.get(f"{args.agent_url}/health", timeout=10).json()
     except httpx.HTTPError as exc:
         agent = {"unavailable": str(exc)}
-    (args.out_dir / "run_info.json").write_text(
-        json.dumps(
-            {
-                "label": args.label,
-                "started_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                "agent": agent,
-                "question_ids": [q["question_id"] for q in selected],
-                "batch_size": args.batch_size,
-                "delay_s": args.delay,
-                "timeout_s": args.timeout,
-            },
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
-
-    combined = {"results": []}
-    if combined_path.exists():
-        combined = json.loads(combined_path.read_text(encoding="utf-8"))
-    rows = {r["question_id"]: r for r in combined["results"]}
+    entry = {
+        "label": args.label,
+        "started_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "agent": agent,
+        "question_ids": [q["question_id"] for q in selected],
+        "batch_size": args.batch_size,
+        "delay_s": args.delay,
+        "timeout_s": args.timeout,
+    }
+    info_path = args.out_dir / "run_info.json"
+    if info_path.exists() and (args.resume or args.retry_errors):
+        info = json.loads(info_path.read_text(encoding="utf-8"))
+        info.setdefault("resumed", []).append(entry)
+    else:
+        info = entry
+    info_path.write_text(json.dumps(info, indent=2), encoding="utf-8")
 
     ran: list[dict] = []
     started = time.monotonic()
@@ -224,13 +267,12 @@ def main() -> None:
         (args.out_dir / f"batch-{report['run_id']}.json").write_text(
             json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8"
         )
-        print_rows(report["results"], types)
         for r in report["results"]:
             rows[r["question_id"]] = {**r, "run_id": report["run_id"]}
         ran.extend(report["results"])
-        # Saved after every batch so an interrupted run loses nothing.
-        ordered = [rows[q["question_id"]] for q in questions if q["question_id"] in rows]
-        combined_path.write_text(json.dumps({"results": ordered}, indent=2, ensure_ascii=False), encoding="utf-8")
+        # Saved before printing, so a display failure can never lose results.
+        write_combined(combined_path, rows, questions)
+        print_rows(report["results"], types)
 
     ordered = [rows[q["question_id"]] for q in questions if q["question_id"] in rows]
     print_summary(ordered, types, ran, time.monotonic() - started)
