@@ -168,6 +168,15 @@ class Settings:
     # Merge a retrieve step's two searches by rank (reciprocal rank fusion)
     # instead of raw score, whose scale differs between endpoints (A013).
     RANK_FUSION_MERGE: bool = _bool("RANK_FUSION_MERGE", False)
+    # Calculation extraction receives the approving grader's note, which names
+    # the figures and passages it checked, and takes operands from them. A026:
+    # grading named Plexus's $102,337 thousand, then extraction used 13,466
+    # from another company's table.
+    EXTRACT_GRADED_FIGURES: bool = _bool("EXTRACT_GRADED_FIGURES", False)
+    # A calculation "formula" that is only a list of values, such as
+    # '38.6, 23.6, 12.2', is re-extracted as a list answer instead of being
+    # declined by the calculator (A086).
+    CALC_LIST_FALLBACK: bool = _bool("CALC_LIST_FALLBACK", False)
     MIN_EVIDENCE_SCORE: float = float(os.getenv("MIN_EVIDENCE_SCORE", "0.35"))
 
     # --- Service ---

@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from typing import Any, Dict, List, Literal, Optional, Tuple, TypedDict
 
@@ -165,6 +166,18 @@ def _citations(
     if picked:
         return _top_evidence(picked, len(picked)), True
     return _top_evidence(evidence, fallback_n), False
+
+
+_NUMBER_ONLY = re.compile(r"^\(?[-\u2212]?\$?\d[\d,]*(?:\.\d+)?%?\)?$")
+
+
+def _is_value_list(formula: str) -> bool:
+    """Two or more plain numbers separated by ", " or ";" and no arithmetic,
+    such as '38.6, 23.6, 12.2'. The calculator reads commas as thousands
+    separators, so such a list can never be evaluated; '12,200' stays one
+    number."""
+    parts = [part.strip() for part in re.split(r";|,\s+", formula.strip())]
+    return len(parts) >= 2 and all(_NUMBER_ONLY.match(part) for part in parts)
 
 
 def build_graph():
@@ -549,7 +562,22 @@ def build_graph():
 
     async def reason_node(state: AgentState) -> AgentState:
         evidence = state.get("evidence", [])
-        extraction = llm.extract(state["question"], state["question_type"], evidence)
+        # EXTRACT_GRADED_FIGURES: only an approving grade reaches this node, and
+        # its note names the figures and passages the grader checked.
+        grade_note = (
+            state.get("grade_reason", "")
+            if settings.EXTRACT_GRADED_FIGURES
+            and state.get("sufficient")
+            and state["question_type"] == "numerical"
+            else ""
+        )
+        if grade_note:
+            _log(state, "graded_figures", note=grade_note)
+            extraction = llm.extract(
+                state["question"], state["question_type"], evidence, grade_note=grade_note
+            )
+        else:
+            extraction = llm.extract(state["question"], state["question_type"], evidence)
         _log_with_usage(state, "extract", llm)
         if settings.ANSWER_REPAIR:
             from app.answer_repair import repair_extraction
@@ -559,6 +587,17 @@ def build_graph():
             )
             if repair_status != "not_needed":
                 _log_with_usage(state, "answer_repair", llm, status=repair_status)
+        if (
+            settings.CALC_LIST_FALLBACK
+            and isinstance(extraction, ExtractionCalculated)
+            and _is_value_list(extraction.formula)
+        ):
+            # A086: a "respectively" list question was classified numerical, and
+            # extraction wrote its three values as '38.6, 23.6, 12.2', which the
+            # calculator rejects. Answer it as a list instead of declining.
+            rejected_formula = extraction.formula
+            extraction = llm.extract(state["question"], "table", evidence)
+            _log_with_usage(state, "list_fallback", llm, rejected_formula=rejected_formula)
         # True when citations are the passages extraction named, False when
         # they fell back to top-ranked hits, None when nothing was cited.
         cited_by_model = None

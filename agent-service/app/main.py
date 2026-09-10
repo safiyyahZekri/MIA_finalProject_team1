@@ -74,6 +74,8 @@ async def health():
                 "GRADE_CALIBRATION",
                 "GRADE_MIN_SCORE",
                 "GRADE_MIN_CONFIDENCE",
+                "EXTRACT_GRADED_FIGURES",
+                "CALC_LIST_FALLBACK",
             )
         }
     )

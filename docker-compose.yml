@@ -13,6 +13,7 @@ services:
       REVIEW_STORE_PATH: /data/documents/reviews.jsonl
       ASK_CACHE_ENABLED: ${ASK_CACHE_ENABLED:-true}
       ASK_CACHE_MAX_ENTRIES: ${ASK_CACHE_MAX_ENTRIES:-500}
+      AGENT_TIMEOUT_SECONDS: ${AGENT_TIMEOUT_SECONDS:-600}
     volumes:
       - source-documents:/data/documents
     healthcheck:
@@ -116,6 +117,8 @@ services:
       GRADE_COMPANY_CONTEXT: ${GRADE_COMPANY_CONTEXT:-false}
       GRADE_REQUIRE_NAMED_TABLE: ${GRADE_REQUIRE_NAMED_TABLE:-false}
       RANK_FUSION_MERGE: ${RANK_FUSION_MERGE:-false}
+      EXTRACT_GRADED_FIGURES: ${EXTRACT_GRADED_FIGURES:-false}
+      CALC_LIST_FALLBACK: ${CALC_LIST_FALLBACK:-false}
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8003/health')"]
       interval: 10s
@@ -161,6 +164,7 @@ services:
     environment:
       ORCHESTRATOR_URL: http://orchestrator-api:8000
       MOCK_MODE: "false"
+      ASK_TIMEOUT_SECONDS: ${ASK_TIMEOUT_SECONDS:-660}
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:7860/')"]
       interval: 10s

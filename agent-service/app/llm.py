@@ -288,7 +288,7 @@ class MockLLM:
         )
         return EvidenceGrade(sufficient=sufficient, confidence=top_score, reason=reason)
 
-    def extract(self, question: str, question_type: str, evidence: List[dict]):
+    def extract(self, question: str, question_type: str, evidence: List[dict], grade_note: str = ""):
         combined_text = " ".join(e.get("text", "") for e in evidence)
         lowered = question.lower()
 
@@ -457,7 +457,7 @@ class OllamaLLM:
             logger.warning("Ollama grade() failed, falling back to mock: %s", exc)
             return self._mock.grade(question, evidence)
 
-    def extract(self, question: str, question_type: str, evidence: List[dict]):
+    def extract(self, question: str, question_type: str, evidence: List[dict], grade_note: str = ""):
         snippets = extraction_snippets(evidence)
 
         if question_type == "numerical":
@@ -641,7 +641,7 @@ class GroqLLM:
             logger.warning("Groq grade() failed, falling back to mock: %s", exc)
             return self._mock.grade(question, evidence)
 
-    def extract(self, question: str, question_type: str, evidence: List[dict]):
+    def extract(self, question: str, question_type: str, evidence: List[dict], grade_note: str = ""):
         snippets = extraction_snippets(evidence)
 
         if question_type == "numerical":
@@ -825,7 +825,7 @@ class _PromptedLLM:
             f"Question: {question}\n\nEvidence:\n{snippets}",
         )
 
-    def extract(self, question: str, question_type: str, evidence: List[dict]):
+    def extract(self, question: str, question_type: str, evidence: List[dict], grade_note: str = ""):
         # Numbered, so extraction can name the passages its answer came from
         # and the answer can cite exactly those.
         snippets = "\n---\n".join(
@@ -845,6 +845,17 @@ class _PromptedLLM:
                     "year-on-year changes inside that period: from 2017 to 2019 means "
                     "2017 to 2018 and 2018 to 2019.\n"
                 )
+            graded_figures = ""
+            if grade_note:
+                # EXTRACT_GRADED_FIGURES. A026: grading named Plexus's figure and
+                # its passage ("$102,337 thousand from sha256-3461..."), then
+                # extraction took 13,466 from a different company's table.
+                graded_figures = (
+                    "An evidence check read these passages before you and approved them "
+                    f"for this question, noting: \"{grade_note}\"\n"
+                    "When that note names a figure needed as an operand and the passage it "
+                    "comes from, take that operand from that passage.\n"
+                )
             try:
                 return self._structured(
                     ExtractionCalculated,
@@ -853,6 +864,7 @@ class _PromptedLLM:
                     "using ONLY the literal numbers found in the evidence "
                     "(e.g. '(3875-3410)/3410*100'). Do not compute the result yourself.\n"
                     f"{calculation_rules}"
+                    f"{graded_figures}"
                     "Set evidence_indexes to the numbers of the passages the operands were "
                     "taken from.\n\n"
                     f"Question: {question}\n\nEvidence:\n{snippets}",
