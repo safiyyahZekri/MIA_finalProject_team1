@@ -3,8 +3,9 @@ Deterministic calculator tool.
 
 Per spec: "Arithmetic must go through the calculator tool, never be produced
 by the LLM from memory." This module evaluates a restricted arithmetic AST
-(numbers, + - * / **, unary -, parentheses only) -- no names, no calls, no
-attribute access -- so it is safe to run on any string the LLM proposes.
+(numbers, + - * / ** %, unary -, parentheses and abs(x) only) -- no other
+names, no other calls, no attribute access -- so it is safe to run on any
+string the LLM proposes.
 """
 import ast
 import operator as op
@@ -20,6 +21,12 @@ _ALLOWED_BINOPS = {
 _ALLOWED_UNARYOPS = {
     ast.UAdd: op.pos,
     ast.USub: op.neg,
+}
+# "How far apart" questions ask for an absolute difference, and their gold
+# derivations use abs() (8 practice questions). A018 found both correct
+# operands and was declined only because abs(...) was rejected.
+_ALLOWED_FUNCTIONS = {
+    "abs": abs,
 }
 
 
@@ -49,15 +56,27 @@ def _eval_node(node):
         if op_type not in _ALLOWED_UNARYOPS:
             raise CalculatorError(f"Unsupported unary operator: {op_type.__name__}")
         return _ALLOWED_UNARYOPS[op_type](_eval_node(node.operand))
+    if isinstance(node, ast.Call):
+        # Exactly abs(x): a plain name, one positional argument, no keywords.
+        # The argument goes through this same restricted evaluator.
+        if (
+            isinstance(node.func, ast.Name)
+            and node.func.id in _ALLOWED_FUNCTIONS
+            and len(node.args) == 1
+            and not node.keywords
+        ):
+            return _ALLOWED_FUNCTIONS[node.func.id](_eval_node(node.args[0]))
+        raise CalculatorError("Unsupported function call: only abs(x) is allowed")
     raise CalculatorError(f"Unsupported expression element: {type(node).__name__}")
 
 
 def calculate(expression: str) -> float:
     """Safely evaluate a pure-arithmetic expression string, e.g.
-    "(3875-3410)/3410*100", and return a float result.
+    "(3875-3410)/3410*100" or "abs(9447-314258)", and return a float result.
 
-    Raises CalculatorError on anything outside +-*/%** and parentheses
-    (no identifiers, function calls, subscripts, comprehensions, etc.).
+    Raises CalculatorError on anything outside +-*/%**, parentheses and
+    abs(x) (no identifiers, other function calls, subscripts,
+    comprehensions, etc.).
     """
     if not expression or not expression.strip():
         raise CalculatorError("Empty expression")
