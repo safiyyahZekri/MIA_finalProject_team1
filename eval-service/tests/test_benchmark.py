@@ -401,6 +401,36 @@ def test_benchmark_stores_system_trace_and_strips_it_before_validation(monkeypat
     }
 
 
+def test_agent_steps_are_logged_to_the_trace(monkeypatch):
+    """Failure analysis reads the agent's steps (queries, hits, grader
+    reasons) from the trace, so each one must be logged there, not only
+    stored in the result row."""
+    import app.benchmark as bench_module
+
+    monkeypatch.setattr(bench_module.httpx, "Client", ContractFakeClient)
+
+    questions = [
+        {
+            "question_id": "q1",
+            "question_text": "What was the operating income reported in 2020?",
+            "ground_truth_answer": "$142.5M",
+            "source_doc_uid": "doc_017",
+            "gold_evidence": [{"source_doc_uid": "doc_017"}],
+        }
+    ]
+    config = BenchmarkConfig(
+        system_url="http://fake-agent/answer",
+        questions=questions,
+        validator_url="http://fake-validator/validate_answer",
+    )
+    result = run_benchmark(config)["results"][0]
+
+    steps = tracing.get_trace(result["trace_id"])["steps"]
+    agent_steps = [s for s in steps if s["name"].startswith("agent.")]
+    assert [s["name"] for s in agent_steps] == ["agent.01.classify", "agent.02.retrieve", "agent.03.generate"]
+    assert agent_steps[1]["output"] == {"step": "retrieve"}
+
+
 # ---------------------------------------------------------------------------
 # eval-service's own trace_id must be independent of upstream tracing and
 # must resolve to an actual (local-fallback-acceptable) trace.

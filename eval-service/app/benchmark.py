@@ -337,6 +337,14 @@ def run_benchmark(config: BenchmarkConfig) -> dict:
                 latency_ms=latency_ms,
                 metadata={"cache_hit": cache_hit},
             )
+            # The agent's own steps (rewritten queries, hits per attempt, grader
+            # reasons) go into the trace as well. Without them the trace shows
+            # only the final answer, which cannot show where a failure started.
+            # They are logged together after the call, so their start times
+            # cannot order them; the number in the name does.
+            steps = [s for s in system_trace if isinstance(s, dict)] if isinstance(system_trace, list) else []
+            for index, step in enumerate(steps, start=1):
+                tracing.log_step(trace_id, f"agent.{index:02d}.{step.get('step', 'step')}", output=step)
 
             schema_valid = None
             validator_reason = None

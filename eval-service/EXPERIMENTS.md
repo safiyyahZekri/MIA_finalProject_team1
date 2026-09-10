@@ -190,9 +190,9 @@ questions it answered, 29 have the right content (C 21, U 1, F 7). Reading the
   decimals, and the scorer allows 1% relative error.
 - A014 gives `31.27`, in millions, against `31,252` thousand. The operands came
   from rounded figures in the narrative text.
-- A086 gives `["$12.2", "$23.6", "$38.6"]` without "million". The source breaks
-  the line between "$38.6" and "million", and the format fix asks for no units
-  outside the span.
+- A086 gives `["$12.2", "$23.6", "$38.6"]` without "million", although the
+  source writes "million" after each figure. The format fix, which asks for no
+  units outside the span, was over-applied (`FAILURE_ANALYSIS_E2E.md`, A086).
 - A049 answers `IBM` for "International Business Machines Corporation".
 - A043 gives a shorter span of the gold sentence (F1 0.72, under the 0.8 used
   for F).
