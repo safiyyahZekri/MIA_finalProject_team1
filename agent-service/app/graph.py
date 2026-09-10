@@ -79,10 +79,19 @@ def _dedup_and_rank(*hit_lists: List[dict]) -> List[dict]:
 
 
 def _top_evidence(hits: List[dict], n: int) -> List[dict]:
-    return [
-        {"document_id": h["document_id"], "page": h["page"], "section": h.get("section")}
-        for h in hits[:n]
-    ]
+    citations = []
+    for hit in hits[:n]:
+        citation = {
+            "document_id": hit["document_id"],
+            "page": hit["page"],
+            "section": hit.get("section"),
+        }
+        # Coordinates are optional for backward compatibility with older
+        # indexes and mock retrieval, but real OCR hits retain them end to end.
+        if hit.get("bbox") is not None:
+            citation["bbox"] = hit["bbox"]
+        citations.append(citation)
+    return citations
 
 
 def _citations(evidence: List[dict], indexes: List[int], fallback_n: int) -> Tuple[List[dict], bool]:

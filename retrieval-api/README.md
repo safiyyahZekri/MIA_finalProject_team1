@@ -59,6 +59,25 @@ once. Reindexing the same canonical ID replaces its old chunks.
 Other corpus routes are `GET /documents`, `DELETE /documents/{document_id}`,
 and `GET /stats`.
 
+## Human correction of extracted fields
+
+`GET /documents/{document_id}/chunks` returns the indexed text/table fields
+shown by the UI. `POST /documents/{document_id}/corrections` accepts:
+
+```json
+{
+  "chunk_id": "chunk-123",
+  "corrected_text": "Operating income | 2022 | 42 million",
+  "corrected_by": "reviewer@example.com",
+  "comment": "Verified against page 4"
+}
+```
+
+Saving a correction embeds the changed chunk, rebuilds BM25/FAISS, and persists
+the updated index without rerunning OCR. An append-only `corrections.jsonl`
+record keeps the original text, corrected text, reviewer, timestamp, and
+comment. `GET /documents/{document_id}/corrections` returns that audit history.
+
 ## Search API
 
 The following endpoints intentionally preserve the existing agent contract:

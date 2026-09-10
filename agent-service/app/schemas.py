@@ -17,6 +17,7 @@ class Evidence(BaseModel):
     document_id: str
     page: int
     section: Optional[str] = None
+    bbox: Optional[tuple[int, int, int, int]] = None
 
 
 class DirectParams(BaseModel):

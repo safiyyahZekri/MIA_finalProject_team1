@@ -48,6 +48,19 @@ def test_two_chunks_of_the_same_page_are_cited_once():
     assert len(citations) == 1
 
 
+def test_citation_keeps_retrieval_bounding_box():
+    hit = {
+        "document_id": "report",
+        "page": 4,
+        "section": "Revenue",
+        "bbox": [10, 20, 300, 120],
+    }
+
+    citations, _ = _citations([hit], [1], fallback_n=1)
+
+    assert citations == [hit]
+
+
 class NamesSecondPassage:
     """An LLM whose extraction cites the second retrieved passage, not the first."""
 

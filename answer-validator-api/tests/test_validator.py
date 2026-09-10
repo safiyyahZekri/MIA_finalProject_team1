@@ -41,6 +41,22 @@ def test_direct_example_is_valid():
     assert "'direct'" in out.log_line
 
 
+def test_evidence_bounding_box_is_valid():
+    answer = {
+        **DIRECT_OK,
+        "evidence": [
+            {
+                "document_id": "doc_017",
+                "page": 1,
+                "section": "Income Statement",
+                "bbox": [10, 20, 500, 180],
+            }
+        ],
+    }
+
+    assert validate_answer(answer).valid is True
+
+
 def test_calculated_example_is_valid():
     out = validate_answer(CALCULATED_OK)
     assert out.valid is True

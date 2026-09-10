@@ -6,8 +6,10 @@ import os
 import re
 import threading
 import time
+import uuid
 from collections import defaultdict
 from collections.abc import Iterable
+from datetime import datetime, timezone
 from pathlib import Path
 
 import faiss
@@ -20,6 +22,9 @@ from .models import (
     Chunk,
     CorpusStats,
     DocumentSummary,
+    ExtractedField,
+    ExtractionCorrectionRecord,
+    ExtractionCorrectionRequest,
     FilterRequest,
     IndexDocumentRequest,
     IndexResponse,
@@ -130,6 +135,10 @@ class RetrievalEngine:
     @property
     def manifest_path(self) -> Path:
         return self.data_dir / "manifest.json"
+
+    @property
+    def corrections_path(self) -> Path:
+        return self.data_dir / "corrections.jsonl"
 
     def _load(self) -> None:
         with self._lock:
@@ -299,6 +308,135 @@ class RetrievalEngine:
             self._rebuild_indexes()
             self._persist()
             return removed
+
+    def document_chunks(self, document_id: str) -> list[ExtractedField]:
+        with self._lock:
+            chunks = [
+                chunk
+                for chunk in self._chunks
+                if document_id in {chunk.document_id, chunk.source_doc_uid}
+            ]
+        if not chunks:
+            raise KeyError("document not found")
+        return [
+            ExtractedField(
+                chunk_id=chunk.chunk_id,
+                document_id=chunk.document_id,
+                page=chunk.page,
+                section=chunk.section,
+                content_type="table" if chunk.content_type == "table" else "text",
+                content=chunk.text,
+                bbox=chunk.bbox,
+                source_block_ids=chunk.source_block_ids,
+            )
+            for chunk in sorted(chunks, key=lambda item: (item.page, item.chunk_id))
+        ]
+
+    def corrections(self, document_id: str) -> list[ExtractionCorrectionRecord]:
+        with self._lock:
+            canonical_ids = {
+                chunk.document_id
+                for chunk in self._chunks
+                if document_id in {chunk.document_id, chunk.source_doc_uid}
+            }
+        if not canonical_ids:
+            raise KeyError("document not found")
+        if not self.corrections_path.exists():
+            return []
+        records: list[ExtractionCorrectionRecord] = []
+        with self._lock, self.corrections_path.open(encoding="utf-8") as handle:
+            for line_number, line in enumerate(handle, start=1):
+                if not line.strip():
+                    continue
+                try:
+                    record = ExtractionCorrectionRecord.model_validate_json(line)
+                except ValueError as exc:
+                    raise RuntimeError(
+                        f"invalid correction record at line {line_number}"
+                    ) from exc
+                if record.document_id in canonical_ids:
+                    records.append(record)
+        return list(reversed(records))
+
+    def correct_extracted_field(
+        self, document_id: str, request: ExtractionCorrectionRequest
+    ) -> ExtractionCorrectionRecord:
+        """Apply an audited text correction and rebuild persistent search indexes."""
+        with self._lock:
+            document_indexes = [
+                index
+                for index, chunk in enumerate(self._chunks)
+                if document_id in {chunk.document_id, chunk.source_doc_uid}
+            ]
+            if not document_indexes:
+                raise KeyError("document not found")
+            matching = [
+                index
+                for index in document_indexes
+                if self._chunks[index].chunk_id == request.chunk_id
+            ]
+            if not matching:
+                raise KeyError("chunk not found in document")
+
+            index = matching[0]
+            original = self._chunks[index]
+            if original.text.strip() == request.corrected_text.strip():
+                raise ValueError("corrected_text must differ from the current text")
+
+            record = ExtractionCorrectionRecord(
+                correction_id=str(uuid.uuid4()),
+                document_id=original.document_id,
+                chunk_id=original.chunk_id,
+                original_text=original.text,
+                corrected_text=request.corrected_text,
+                corrected_by=request.corrected_by,
+                comment=request.comment,
+                created_at=datetime.now(timezone.utc),
+            )
+            corrected_parent = (
+                original.parent_text.replace(original.text, request.corrected_text, 1)
+                if original.text in original.parent_text
+                else request.corrected_text
+            )
+            corrected = original.model_copy(
+                update={
+                    "text": request.corrected_text,
+                    "parent_text": corrected_parent,
+                }
+            )
+            replacement = self.embedder.encode_documents(
+                [self._searchable_text(corrected)]
+            )
+            if replacement.ndim != 2 or replacement.shape != (1, self._vectors.shape[1]):
+                raise RuntimeError("embedder returned an invalid correction vector")
+
+            self.data_dir.mkdir(parents=True, exist_ok=True)
+            previous_log = (
+                self.corrections_path.read_bytes()
+                if self.corrections_path.exists()
+                else None
+            )
+            log_tmp = self.corrections_path.with_suffix(".jsonl.tmp")
+            log_tmp.write_bytes(
+                (previous_log or b"")
+                + (record.model_dump_json() + "\n").encode("utf-8")
+            )
+
+            previous_vectors = self._vectors.copy()
+            self._chunks[index] = corrected
+            self._vectors[index] = replacement[0]
+            try:
+                self._rebuild_indexes()
+                self._persist()
+                os.replace(log_tmp, self.corrections_path)
+            except Exception:
+                self._chunks[index] = original
+                self._vectors = previous_vectors
+                self._rebuild_indexes()
+                if log_tmp.exists():
+                    log_tmp.unlink()
+                raise
+            return record
 
     @staticmethod
     def _matches(chunk: Chunk, filters: SearchFilters) -> bool:

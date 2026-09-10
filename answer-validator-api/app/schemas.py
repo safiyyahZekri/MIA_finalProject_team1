@@ -32,6 +32,7 @@ class EvidenceItem(BaseModel):
     document_id: str = Field(min_length=1)
     page: int = Field(ge=0)
     section: Optional[str] = None
+    bbox: Optional[tuple[int, int, int, int]] = None
 
     @field_validator("document_id")
     @classmethod

@@ -116,6 +116,74 @@ def test_internal_paragraph_is_exposed_as_public_text(
     assert {hit["content_type"] for hit in response.json()["hits"]} == {"text"}
 
 
+def test_human_correction_is_audited_reindexed_and_persistent(
+    engine, sample_document
+) -> None:
+    client = TestClient(create_app(engine))
+    indexed = client.post("/documents", json=sample_document)
+    assert indexed.status_code == 201
+    document_id = indexed.json()["document_id"]
+
+    chunks = client.get(f"/documents/{document_id}/chunks")
+    assert chunks.status_code == 200
+    target = next(item for item in chunks.json() if "9,447" in item["content"])
+
+    corrected = client.post(
+        f"/documents/{document_id}/corrections",
+        json={
+            "chunk_id": target["chunk_id"],
+            "corrected_text": target["content"].replace("9,447", "9,477"),
+            "corrected_by": "finance-reviewer",
+            "comment": "Checked against the source PDF.",
+        },
+    )
+
+    assert corrected.status_code == 200
+    record = corrected.json()
+    assert record["original_text"] == target["content"]
+    assert "9,477" in record["corrected_text"]
+    assert record["status"] == "applied"
+
+    search = client.post(
+        "/search/bm25",
+        json={"query": "9,477", "document_id": document_id, "top_k": 5},
+    )
+    assert search.status_code == 200
+    assert any("9,477" in hit["content"] for hit in search.json()["hits"])
+
+    history = client.get(f"/documents/{document_id}/corrections")
+    assert history.status_code == 200
+    assert history.json()[0]["correction_id"] == record["correction_id"]
+
+    reloaded_chunks = engine.__class__(
+        data_dir=engine.data_dir,
+        embedder=engine.embedder,
+        reranker=engine.reranker,
+        chunking=engine.chunking,
+    ).document_chunks(document_id)
+    assert any("9,477" in item.content for item in reloaded_chunks)
+
+
+def test_correction_rejects_unknown_or_unchanged_fields(engine, sample_document) -> None:
+    client = TestClient(create_app(engine))
+    document_id = client.post("/documents", json=sample_document).json()["document_id"]
+    target = client.get(f"/documents/{document_id}/chunks").json()[0]
+    payload = {
+        "chunk_id": target["chunk_id"],
+        "corrected_text": target["content"],
+        "corrected_by": "reviewer",
+    }
+    assert client.post(
+        f"/documents/{document_id}/corrections", json=payload
+    ).status_code == 422
+    payload["chunk_id"] = "missing"
+    payload["corrected_text"] = "different"
+    assert client.post(
+        f"/documents/{document_id}/corrections", json=payload
+    ).status_code == 404
+    assert client.get("/documents/missing/chunks").status_code == 404
+
+
 def test_batch_endpoint_indexes_multiple_documents(engine, sample_document: dict) -> None:
     second = deepcopy(sample_document)
     second["document"]["document_id"] = "doc-jabil"

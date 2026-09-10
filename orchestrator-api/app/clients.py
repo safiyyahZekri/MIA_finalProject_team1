@@ -145,6 +145,52 @@ async def list_documents() -> list[dict]:
         return resp.json()
 
 
+async def get_extracted_fields(document_id: str) -> list[dict]:
+    try:
+        async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+            response = await client.get(
+                f"{RETRIEVAL_SERVICE_URL}/documents/{document_id}/chunks"
+            )
+    except httpx.HTTPError as exc:
+        raise ServiceIntegrationError("retrieval_correction", str(exc)) from exc
+    if response.is_error:
+        raise ServiceIntegrationError(
+            "retrieval_correction", _error_message(response), response.status_code
+        )
+    return response.json()
+
+
+async def apply_extraction_correction(document_id: str, payload: dict) -> dict:
+    try:
+        async with httpx.AsyncClient(timeout=RETRIEVAL_INDEX_TIMEOUT) as client:
+            response = await client.post(
+                f"{RETRIEVAL_SERVICE_URL}/documents/{document_id}/corrections",
+                json=payload,
+            )
+    except httpx.HTTPError as exc:
+        raise ServiceIntegrationError("retrieval_correction", str(exc)) from exc
+    if response.is_error:
+        raise ServiceIntegrationError(
+            "retrieval_correction", _error_message(response), response.status_code
+        )
+    return response.json()
+
+
+async def list_extraction_corrections(document_id: str) -> list[dict]:
+    try:
+        async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+            response = await client.get(
+                f"{RETRIEVAL_SERVICE_URL}/documents/{document_id}/corrections"
+            )
+    except httpx.HTTPError as exc:
+        raise ServiceIntegrationError("retrieval_correction", str(exc)) from exc
+    if response.is_error:
+        raise ServiceIntegrationError(
+            "retrieval_correction", _error_message(response), response.status_code
+        )
+    return response.json()
+
+
 def _mock_agent_answer(question: str) -> dict:
     q = question.lower()
     if "how many" in q or "count" in q or "which" in q:

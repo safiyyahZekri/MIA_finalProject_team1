@@ -10,9 +10,32 @@ path. The integrated ports are:
 - answer validator: 8004
 - evaluation/observability: 8005
 
-Start the stack with `docker compose up --build`. Upload a PDF through
-`POST http://localhost:8000/documents/ingest`, then query the agent/orchestrator.
-Retrieval data and the Hugging Face model cache use named Docker volumes.
+Start all seven services with one command:
+
+```bash
+docker compose up --build
+```
+
+Compose waits for services to become healthy before starting their dependants.
+Retrieval indexes, Hugging Face models, and uploaded source PDFs use named
+volumes. The service URLs are:
+
+| Service | URL |
+| --- | --- |
+| Orchestrator | http://localhost:8000 |
+| Document processor | http://localhost:8001 |
+| Retrieval | http://localhost:8002 |
+| Agent | http://localhost:8003 |
+| Answer validator | http://localhost:8004 |
+| Evaluation / tracing | http://localhost:8005 |
+| UI | http://localhost:7860 |
+
+Upload a PDF through `POST http://localhost:8000/documents/ingest`, then query
+the agent/orchestrator. When OCR coordinates are available, the UI highlights
+the cited region on the original PDF page. Reviewers can also use **Correct
+OCR** to edit an indexed text/table extraction: the original value is audited,
+the corrected chunk is re-embedded, and retrieval is rebuilt without rerunning
+PDF preprocessing. Answer-level feedback remains separately available in Chat.
 
 Service-specific retrieval contracts, calibration, benchmark commands, and
 the TAT-DQA OCR pipeline are documented in `retrieval-api/README.md` and

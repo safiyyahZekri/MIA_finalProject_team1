@@ -8,6 +8,8 @@ on:
       - "agent-service/**"
       - "orchestrator-api/**"
       - "eval-service/**"
+      - "answer-validator-api/**"
+      - "ui-service/**"
       - "docker-compose.yml"
       - ".github/workflows/retrieval-ci.yml"
   pull_request:
@@ -17,6 +19,8 @@ on:
       - "agent-service/**"
       - "orchestrator-api/**"
       - "eval-service/**"
+      - "answer-validator-api/**"
+      - "ui-service/**"
       - "docker-compose.yml"
 
 jobs:
@@ -39,7 +43,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        service: [agent-service, orchestrator-api, eval-service]
+        service: [agent-service, answer-validator-api, orchestrator-api, eval-service, ui-service]
     defaults:
       run:
         working-directory: ${{ matrix.service }}
@@ -57,3 +61,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: docker compose config --quiet
+      - name: Assert all seven services are included
+        run: |
+          test "$(docker compose config --services | wc -l)" -eq 7
+          for service in orchestrator-api doc-processor-api retrieval-api agent-service answer-validator-api eval-service ui-service; do
+            docker compose config --services | grep -Fx "$service"
+          done
