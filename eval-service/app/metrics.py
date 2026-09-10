@@ -21,14 +21,48 @@ Number = Union[int, float]
 # ---------------------------------------------------------------------------
 
 _ARTICLES = {"a", "an", "the"}
+# A token that is only a figure: optional currency symbol, sign, accounting
+# parentheses, thousands separators, decimals and a trailing percent sign.
+_NUMBER_TOKEN_RE = re.compile(r"^\$?\(?[-+]?\$?\d[\d,]*(?:\.\d+)?%?\)?$")
+
+
+def _canonical_number(token: str) -> Optional[str]:
+    """Render a numeric token in one canonical form, or None if it isn't one.
+
+    Stripping punctuation character by character -- the SQuAD approach -- is
+    wrong for figures. It turned a calculated 304811.0 into "3048110", so a
+    perfect answer missed gold 304811, and it deleted the minus sign, so 3.5
+    matched gold -3.5. Figures are compared by value instead.
+    """
+    core = token.rstrip(".,;:")
+    if not _NUMBER_TOKEN_RE.match(core):
+        return None
+    negative = "(" in core and ")" in core
+    digits = core.replace("$", "").replace(",", "").replace("(", "").replace(")", "").rstrip("%")
+    try:
+        value = float(digits)
+    except ValueError:
+        return None
+    if negative:
+        value = -abs(value)
+    if value == 0:
+        value = 0.0  # fold -0.0 into 0
+    return f"{value:.6f}".rstrip("0").rstrip(".")
 
 
 def _normalize_text(s: str) -> str:
     """SQuAD-style normalization: lowercase, strip punctuation, drop
-    articles, collapse whitespace."""
-    s = s.lower()
-    s = "".join(ch for ch in s if ch not in string.punctuation)
-    tokens = [t for t in s.split() if t not in _ARTICLES]
+    articles, collapse whitespace -- except that numeric tokens keep their
+    value, sign included (see _canonical_number)."""
+    tokens = []
+    for raw in s.lower().split():
+        number = _canonical_number(raw)
+        if number is not None:
+            tokens.append(number)
+            continue
+        word = "".join(ch for ch in raw if ch not in string.punctuation)
+        if word and word not in _ARTICLES:
+            tokens.append(word)
     return " ".join(tokens)
 
 

@@ -210,7 +210,13 @@ class BenchmarkConfig:
     validator_url: Optional[str] = None
     answer_key: Optional[str] = "answer"  # confirmed default: agent-service nests under "answer"
     retrieval_k: int = 5
+    # One question can make up to seven LLM calls, and the SDK waits out rate
+    # limits inside a call, so a real provider needs far longer than a mock.
+    # Too short a timeout records a slow-but-correct answer as an error.
     timeout_s: float = 60.0
+    # Pause between questions so a run stays under a per-minute token limit
+    # instead of bursting into it.
+    delay_between_questions_s: float = 0.0
     # Field names matching the confirmed practice-question record schema.
     question_field: str = "question_text"
     gold_field: str = "ground_truth_answer"
@@ -263,7 +269,9 @@ def run_benchmark(config: BenchmarkConfig) -> dict:
     cache = SemanticCache(config.cache_similarity_threshold) if config.use_cache else None
 
     with httpx.Client(timeout=config.timeout_s) as client:
-        for q in config.questions:
+        for index, q in enumerate(config.questions):
+            if index and config.delay_between_questions_s > 0:
+                time.sleep(config.delay_between_questions_s)
             qid = q.get("question_id", str(uuid.uuid4()))
             question_text = q.get(config.question_field, "")
             gold = q.get(config.gold_field)
@@ -301,12 +309,23 @@ def run_benchmark(config: BenchmarkConfig) -> dict:
                         body, config.answer_key
                     )
                     if isinstance(body, dict):
-                        for perf_field in ("llm_calls", "tokens_used", "cost_usd", "retries_used"):
+                        for perf_field in (
+                            "llm_calls",
+                            "tokens_used",
+                            "input_tokens",
+                            "output_tokens",
+                            "cost_usd",
+                            "retries_used",
+                        ):
                             if perf_field in body:
                                 perf_extra[perf_field] = body[perf_field]
                     if cache is not None and answer_obj is not None:
                         cache.set(question_text, scoping_doc_id, (answer_obj, system_trace, question_type, perf_extra))
-                except Exception as exc:  # network error, bad JSON, non-2xx, etc.
+                except httpx.HTTPStatusError as exc:
+                    # The status line alone ("503 Service Unavailable") hides the
+                    # cause; the body names it, e.g. a rate limit after retries.
+                    error = f"{exc}: {exc.response.text[:500]}"
+                except Exception as exc:  # network error, bad JSON, timeout, etc.
                     error = str(exc)
             latency_ms = (time.perf_counter() - start) * 1000
 
@@ -425,6 +444,8 @@ def _summarize(results: List[QuestionResult]) -> dict:
     perf_tokens = [r.extra_perf.get("tokens_used") for r in results if "tokens_used" in r.extra_perf]
     perf_cost = [r.extra_perf.get("cost_usd") for r in results if "cost_usd" in r.extra_perf]
     perf_retries = [r.extra_perf.get("retries_used") for r in results if "retries_used" in r.extra_perf]
+    perf_input = [r.extra_perf.get("input_tokens") for r in results if "input_tokens" in r.extra_perf]
+    perf_output = [r.extra_perf.get("output_tokens") for r in results if "output_tokens" in r.extra_perf]
 
     failed = [r for r in results if r.is_failure]
     failed_examples = [
@@ -441,6 +462,9 @@ def _summarize(results: List[QuestionResult]) -> dict:
         "num_questions": n,
         "num_errors": n_errors,
         "error_rate": n_errors / n if n else None,
+        # The answer-quality means below cover only these: an errored question
+        # has no score and is excluded, not counted as wrong.
+        "num_answered": sum(1 for r in results if r.predicted_answer is not None),
         "exact_match": m.mean([r.exact_match for r in results]),
         "f1": m.mean([r.f1 for r in results]),
         "numerical_accuracy": m.mean([r.numerical_accuracy for r in results]),
@@ -452,6 +476,8 @@ def _summarize(results: List[QuestionResult]) -> dict:
         "avg_latency_ms": m.mean([r.latency_ms for r in results]),
         "avg_llm_calls": m.mean(perf_llm_calls),
         "avg_tokens_used": m.mean(perf_tokens),
+        "avg_input_tokens": m.mean(perf_input),
+        "avg_output_tokens": m.mean(perf_output),
         "avg_cost_usd": m.mean(perf_cost),
         "avg_retries_used": m.mean(perf_retries),
         "num_failed_examples": len(failed),

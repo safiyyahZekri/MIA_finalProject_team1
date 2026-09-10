@@ -100,6 +100,8 @@ class BenchmarkRunRequest(BaseModel):
     gold_field: str = "ground_truth_answer"
     scale_field: str = "scale"
     scope_to_gold_document: bool = False
+    timeout_s: float = 60.0
+    delay_between_questions_s: float = 0.0
 
 
 @app.post("/benchmark/run")
@@ -114,6 +116,8 @@ def benchmark_run(req: BenchmarkRunRequest):
         gold_field=req.gold_field,
         scale_field=req.scale_field,
         scope_to_gold_document=req.scope_to_gold_document,
+        timeout_s=req.timeout_s,
+        delay_between_questions_s=req.delay_between_questions_s,
     )
     report = run_benchmark(config)
     return {"run_id": report["run_id"], "summary": report["summary"]}
@@ -129,6 +133,8 @@ async def benchmark_run_from_file(
     gold_field: str = Form("ground_truth_answer"),
     scale_field: str = Form("scale"),
     scope_to_gold_document: bool = Form(False),
+    timeout_s: float = Form(60.0),
+    delay_between_questions_s: float = Form(0.0),
     file: UploadFile = File(...),
 ):
     """Convenience endpoint: upload the 100-question practice set (JSON
