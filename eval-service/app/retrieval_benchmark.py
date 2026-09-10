@@ -76,6 +76,9 @@ class RetrievalBenchmarkConfig:
     questions: list[dict]
     variant: RetrievalVariant = VARIANTS[-1]
     candidate_k: int = 30
+    dense_weight: float = 0.55
+    rrf_k: int = 60
+    verify_search_settings: bool = False
     top_k: int = 10
     timeout_seconds: float = 60.0
     question_field: str = "question_text"
@@ -253,6 +256,8 @@ def run_retrieval_benchmark(
                 "top_k": config.top_k,
                 "candidate_k": config.candidate_k,
                 "rerank": config.variant.rerank,
+                "dense_weight": config.dense_weight,
+                "rrf_k": config.rrf_k,
             }
             if config.scope_to_gold_document and len(relevant) == 1:
                 payload["document_id"] = next(iter(relevant)).split("::page:")[0]
@@ -266,6 +271,12 @@ def run_retrieval_benchmark(
                 )
                 response.raise_for_status()
                 body = response.json()
+                if config.verify_search_settings:
+                    applied = body.get("diagnostics", {}).get("search_settings", {})
+                    if any(applied.get(key) != payload[key] for key in ("dense_weight", "rrf_k", "candidate_k", "top_k")):
+                        raise ValueError("Retrieval did not confirm the requested tuning settings; update retrieval-api")
+                if config.variant.rerank and body.get("hits") and body.get("reranked") is not True:
+                    raise ValueError("Requested reranking but retrieval did not confirm reranked=true")
                 retrieved = _ordered_unique(
                     [
                         _hit_identity(hit, config.relevance_unit, config.identity_aliases)
@@ -298,6 +309,8 @@ def run_retrieval_benchmark(
         "retrieval_url": config.retrieval_url,
         "scope_to_gold_document": config.scope_to_gold_document,
         "relevance_unit": config.relevance_unit,
+        "search_settings": {"candidate_k": config.candidate_k, "top_k": config.top_k,
+                            "dense_weight": config.dense_weight, "rrf_k": config.rrf_k},
         "summary": _summarize(rows),
         "results": rows,
     }

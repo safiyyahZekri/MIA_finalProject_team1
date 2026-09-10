@@ -38,7 +38,7 @@ class FakeRetrievalClient:
                 "page": 2,
             },
         ]
-        return FakeResponse({"hits": hits, "latency_ms": 1.0})
+        return FakeResponse({"hits": hits, "latency_ms": 1.0, "reranked": json.get("rerank", False)})
 
 
 QUESTIONS = [

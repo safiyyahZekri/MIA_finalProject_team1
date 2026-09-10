@@ -23,7 +23,7 @@ import time
 from typing import List, Literal, Optional, get_args, get_origin
 
 import httpx
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from app.config import settings
 from app.decomposition import QueryPlan, decomposition_prompt
@@ -43,6 +43,45 @@ LIST_KEYWORDS = ["which", "list", "categories", "items that", "name the", "what 
 
 _NUMBER_RE = re.compile(r"-?\$?\d[\d,]*\.?\d*")
 _MONEY_RE = re.compile(r"\$-?\d[\d,]*\.?\d*")
+
+
+def answer_shape_rules() -> str:
+    """Return extraction guidance used by every real LLM provider.
+
+    This is feature-gated because prompt changes must be evaluated against the
+    same question set and index. It does not inspect gold answers or dataset
+    identifiers and does not add an LLM call.
+    """
+    if not settings.ANSWER_SHAPE_GUIDANCE:
+        return ""
+    return (
+        "Follow these answer-shape rules:\n"
+        "- Use direct for one requested fact, entity, explanation, or reason, even when "
+        "the answer phrase contains conjunctions or several supporting clauses.\n"
+        "- Use multi_span only when the question explicitly requests multiple independent "
+        "items/values (for example, a list or values requested respectively). Preserve "
+        "their requested order.\n"
+        "- If the question asks which page supports an answer, represent the page through "
+        "the evidence citation/evidence_indexes; never include a page number in value or "
+        "values.\n"
+        "- Copy the complete contiguous phrase or clause needed to answer. Keep material "
+        "qualifiers such as time scope and causal wording; omit unrelated surrounding prose.\n"
+        "- For money and quantities, preserve the currency, unit, and scale stated in the "
+        "evidence. If one unit or scale applies to several requested values, include it with "
+        "each value so every answer is unambiguous.\n"
+        "- When identifying a company or organization, use its full name as written in the "
+        "evidence rather than shortening it to an acronym.\n"
+        "Do not add facts or explanation that are absent from the evidence.\n"
+    )
+
+
+def anthropic_answer_copy_rules() -> str:
+    """Keep Anthropic's established baseline prompt when guidance is off."""
+    return answer_shape_rules() or (
+        "Copy each value exactly as it is written in the evidence, as the shortest "
+        "span that answers the question. Do not add labels, years, units, currency "
+        "symbols or explanation that are not part of that span.\n"
+    )
 
 
 def _looks_like_year(raw_digits: str, value: float) -> bool:
@@ -85,6 +124,50 @@ def _extract_numbers(text: str) -> List[float]:
 class Classification(BaseModel):
     question_type: Literal["numerical", "table", "text"]
     search_query: str
+    entities: List[str] = Field(default_factory=list, max_length=3)
+
+    @field_validator("entities")
+    @classmethod
+    def normalize_entities(cls, entities: List[str]) -> List[str]:
+        unique = {}
+        for entity in entities:
+            clean = " ".join(entity.split())
+            if clean:
+                unique.setdefault(clean.casefold(), clean)
+        return list(unique.values())
+
+
+def entity_classification_instruction() -> str:
+    if not settings.ENTITY_DOCUMENT_ROUTING:
+        return ""
+    return (
+        "entities: the company or organization names explicitly written in the "
+        "question, preserving their wording and order; [] when none. Do not include "
+        "metrics, people, locations, guessed aliases, document IDs, or filenames.\n"
+    )
+
+
+def evidence_source_label(evidence: dict, include_score: bool = False) -> str:
+    parts = [str(evidence.get("document_id")), f"p{evidence.get('page')}"]
+    if include_score:
+        parts.append(f"score={evidence.get('score')}")
+    if evidence.get("routed_entity"):
+        parts.append(f"verified_entity={evidence['routed_entity']}")
+    return " ".join(parts)
+
+
+def extraction_snippets(evidence: List[dict]) -> str:
+    return "\n---\n".join(
+        (f"[{i}] {evidence_source_label(e)}" if settings.ANSWER_REPAIR
+         else f"[{evidence_source_label(e)}]") + f"\n{e.get('text', '')}"
+        for i, e in enumerate(evidence, 1)
+    ) or "(no evidence retrieved)"
+
+
+def repair_citation_rules() -> str:
+    return ("Include evidence_indexes: [1, ...] in each supported answer JSON, "
+            "using the 1-based passage numbers that support its values.\n"
+            if settings.ANSWER_REPAIR else "")
 
 
 class EvidenceGrade(BaseModel):
@@ -315,13 +398,19 @@ class OllamaLLM:
         return QueryPlan.model_validate(self._generate(decomposition_prompt(question)))
 
     def classify(self, question: str) -> Classification:
+        entity_json = (
+            ', "entities": ["<company name>"]'
+            if settings.ENTITY_DOCUMENT_ROUTING
+            else ""
+        )
         prompt = (
             "Classify this financial-document question for retrieval routing.\n"
             'Return ONLY JSON: {"question_type": "numerical"|"table"|"text", '
-            '"search_query": "<focused retrieval query>"}\n'
+            f'"search_query": "<focused retrieval query>"{entity_json}}}\n'
             "- numerical: requires arithmetic (comparison, % change, sum, ratio, sort, etc.)\n"
             "- table: the answer likely lives in a financial table/line item, no math needed\n"
             "- text: narrative/prose answer\n\n"
+            f"{entity_classification_instruction()}"
             f"Question: {question}"
         )
         try:
@@ -344,7 +433,7 @@ class OllamaLLM:
 
     def grade(self, question: str, evidence: List[dict]) -> EvidenceGrade:
         snippets = "\n---\n".join(
-            f"[{e.get('document_id')} p{e.get('page')} score={e.get('score')}]\n{e.get('text', '')}"
+            f"[{evidence_source_label(e, include_score=True)}]\n{e.get('text', '')}"
             for e in evidence
         ) or "(no evidence retrieved)"
         prompt = (
@@ -361,9 +450,7 @@ class OllamaLLM:
             return self._mock.grade(question, evidence)
 
     def extract(self, question: str, question_type: str, evidence: List[dict]):
-        snippets = "\n---\n".join(
-            f"[{e.get('document_id')} p{e.get('page')}]\n{e.get('text', '')}" for e in evidence
-        ) or "(no evidence retrieved)"
+        snippets = extraction_snippets(evidence)
 
         if question_type == "numerical":
             prompt = (
@@ -389,15 +476,16 @@ class OllamaLLM:
             '- {"shape": "multi_span", "values": ["<value1>", "<value2>", ...]}\n'
             '- {"shape": "insufficient", "reason": "<why the evidence doesn\'t answer it>"}\n'
             "Return ONLY one JSON object matching one of the shapes above -- no explanation text.\n\n"
+            f"{answer_shape_rules()}{repair_citation_rules()}"
             f"Question: {question}\n\nEvidence:\n{snippets}"
         )
         try:
             data = self._generate(prompt)
             shape = data.get("shape")
             if shape == "direct":
-                return ExtractionDirect(value=str(data["value"]))
+                return ExtractionDirect(value=str(data["value"]), evidence_indexes=data.get("evidence_indexes", []) if settings.ANSWER_REPAIR else [])
             if shape == "multi_span":
-                return ExtractionMultiSpan(values=[str(v) for v in data["values"]])
+                return ExtractionMultiSpan(values=[str(v) for v in data["values"]], evidence_indexes=data.get("evidence_indexes", []) if settings.ANSWER_REPAIR else [])
             if shape == "insufficient":
                 return ExtractionInsufficient(reason=str(data.get("reason", "Insufficient evidence.")))
             raise ValueError(f"Unknown shape '{shape}'")
@@ -494,13 +582,19 @@ class GroqLLM:
         return QueryPlan.model_validate(self._generate(decomposition_prompt(question)))
 
     def classify(self, question: str) -> Classification:
+        entity_json = (
+            ', "entities": ["<company name>"]'
+            if settings.ENTITY_DOCUMENT_ROUTING
+            else ""
+        )
         prompt = (
             "Classify this financial-document question for retrieval routing.\n"
             'Return ONLY JSON: {"question_type": "numerical"|"table"|"text", '
-            '"search_query": "<focused retrieval query>"}\n'
+            f'"search_query": "<focused retrieval query>"{entity_json}}}\n'
             "- numerical: requires arithmetic (comparison, % change, sum, ratio, sort, etc.)\n"
             "- table: the answer likely lives in a financial table/line item, no math needed\n"
             "- text: narrative/prose answer\n\n"
+            f"{entity_classification_instruction()}"
             f"Question: {question}"
         )
         try:
@@ -523,7 +617,7 @@ class GroqLLM:
 
     def grade(self, question: str, evidence: List[dict]) -> EvidenceGrade:
         snippets = "\n---\n".join(
-            f"[{e.get('document_id')} p{e.get('page')} score={e.get('score')}]\n{e.get('text', '')}"
+            f"[{evidence_source_label(e, include_score=True)}]\n{e.get('text', '')}"
             for e in evidence
         ) or "(no evidence retrieved)"
         prompt = (
@@ -540,9 +634,7 @@ class GroqLLM:
             return self._mock.grade(question, evidence)
 
     def extract(self, question: str, question_type: str, evidence: List[dict]):
-        snippets = "\n---\n".join(
-            f"[{e.get('document_id')} p{e.get('page')}]\n{e.get('text', '')}" for e in evidence
-        ) or "(no evidence retrieved)"
+        snippets = extraction_snippets(evidence)
 
         if question_type == "numerical":
             prompt = (
@@ -568,15 +660,16 @@ class GroqLLM:
             '- {"shape": "multi_span", "values": ["<value1>", "<value2>", ...]}\n'
             '- {"shape": "insufficient", "reason": "<why the evidence doesn\'t answer it>"}\n'
             "Return ONLY one JSON object matching one of the shapes above -- no explanation text.\n\n"
+            f"{answer_shape_rules()}{repair_citation_rules()}"
             f"Question: {question}\n\nEvidence:\n{snippets}"
         )
         try:
             data = self._generate(prompt)
             shape = data.get("shape")
             if shape == "direct":
-                return ExtractionDirect(value=str(data["value"]))
+                return ExtractionDirect(value=str(data["value"]), evidence_indexes=data.get("evidence_indexes", []) if settings.ANSWER_REPAIR else [])
             if shape == "multi_span":
-                return ExtractionMultiSpan(values=[str(v) for v in data["values"]])
+                return ExtractionMultiSpan(values=[str(v) for v in data["values"]], evidence_indexes=data.get("evidence_indexes", []) if settings.ANSWER_REPAIR else [])
             if shape == "insufficient":
                 return ExtractionInsufficient(reason=str(data.get("reason", "Insufficient evidence.")))
             raise ValueError(f"Unknown shape '{shape}'")
@@ -658,6 +751,7 @@ class _PromptedLLM:
             "- table: answer likely lives in a financial table/line item, no math needed\n"
             "- text: narrative/prose answer\n"
             "search_query: a focused retrieval query derived from the question.\n\n"
+            f"{entity_classification_instruction()}"
             f"Question: {question}",
         )
 
@@ -673,7 +767,7 @@ class _PromptedLLM:
 
     def grade(self, question: str, evidence: List[dict]) -> EvidenceGrade:
         snippets = "\n---\n".join(
-            f"[{e.get('document_id')} p{e.get('page')} score={e.get('score')}]\n{e.get('text','')}"
+            f"[{evidence_source_label(e, include_score=True)}]\n{e.get('text','')}"
             for e in evidence
         ) or "(no evidence retrieved)"
         rules: List[str] = []
@@ -727,7 +821,7 @@ class _PromptedLLM:
         # Numbered, so extraction can name the passages its answer came from
         # and the answer can cite exactly those.
         snippets = "\n---\n".join(
-            f"[{i}] {e.get('document_id')} p{e.get('page')}\n{e.get('text','')}"
+            f"[{i}] {evidence_source_label(e)}\n{e.get('text','')}"
             for i, e in enumerate(evidence, start=1)
         )
         if question_type == "numerical":
@@ -779,10 +873,9 @@ class _PromptedLLM:
                 "Leave the fields belonging to the other shapes unset.\n"
                 # Opus 5 writes fuller answers by default -- "2019: $2,657
                 # thousand" for a cell reading "2,657" -- which exact match
-                # scores as wrong even when the fact is right.
-                "Copy each value exactly as it is written in the evidence, as the shortest "
-                "span that answers the question. Do not add labels, years, units, currency "
-                "symbols or explanation that are not part of that span.\n"
+                # scores as wrong even when the fact is right. With
+                # ANSWER_SHAPE_GUIDANCE on, its rules replace this one.
+                f"{anthropic_answer_copy_rules()}"
                 f"{format_rules}"
                 "Set evidence_indexes to the numbers of the passages the answer was taken "
                 "from.\n\n"

@@ -222,7 +222,16 @@ def test_health_reports_the_settings_experiments_vary():
     from app import main
 
     config = TestClient(main.app).get("/health").json()["config"]
-    assert {"top_k_final", "max_retries", "grade_require_entity_match"} <= config.keys()
+    assert {
+        "top_k_final",
+        "max_retries",
+        "answer_shape_guidance",
+        "retry_evidence_fusion",
+        "retry_fusion_max_hits",
+        "entity_document_routing",
+        "entity_routing_candidates",
+        "grade_require_entity_match",
+    } <= config.keys()
 
 
 @pytest.mark.parametrize(

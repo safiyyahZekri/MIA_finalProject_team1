@@ -143,6 +143,15 @@ deterministic serialization is shared by dense and lexical indexing.
 
 ## Observability and persistence
 
+Search also accepts `dense_weight` (0–1, default 0.55) and `rrf_k` (1–200,
+default 60). Dense RRF uses `dense_weight`; lexical RRF uses `1-dense_weight`.
+Hybrid confidence allocates 10% to normalized fusion and 90% to dense/lexical
+signals. The dense share is `0.9*w / (w + (1-w)*7/9)`, retaining the previous
+0.55/0.35 split at the default weight. Scores remain bounded, and reranking
+retains the existing base/logit blend. `diagnostics.search_settings` echoes
+these values along with `top_k` and `candidate_k`. No index rebuild is needed.
+See the [tuning guide](../eval-service/NO_PREPROCESSING_OPTIMIZATIONS.md).
+
 When `EVAL_SERVICE_URL` is set, each search sends best-effort trace events for
 filtering, dense search, BM25, fusion, reranking, and final results, including
 candidate counts and per-stage latency. No full chunk/document bodies are sent.

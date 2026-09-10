@@ -116,6 +116,35 @@ class Settings:
     TOP_K_FINAL: int = int(os.getenv("TOP_K_FINAL", "5"))
     MAX_RETRIES: int = int(os.getenv("MAX_RETRIES", "2"))
     QUERY_DECOMPOSITION: bool = _bool("QUERY_DECOMPOSITION", False)
+    ADAPTIVE_TOP_K: bool = _bool("ADAPTIVE_TOP_K", False)
+    ADAPTIVE_TOP_K_MAX: int = min(50, max(1, int(os.getenv("ADAPTIVE_TOP_K_MAX", "15"))))
+    EVIDENCE_DIVERSIFICATION: bool = _bool("EVIDENCE_DIVERSIFICATION", False)
+    QUERY_EXPANSION: bool = _bool("QUERY_EXPANSION", False)
+    TABLE_QUERY_REWRITING: bool = _bool("TABLE_QUERY_REWRITING", False)
+    ADJACENT_EVIDENCE: bool = _bool("ADJACENT_EVIDENCE", False)
+    ANSWER_REPAIR: bool = _bool("ANSWER_REPAIR", False)
+    ANSWER_NORMALIZATION: bool = _bool("ANSWER_NORMALIZATION", False)
+    QUESTION_TYPE_RETRIEVAL: bool = _bool("QUESTION_TYPE_RETRIEVAL", False)
+    RETRIEVAL_PROFILES_JSON: str = os.getenv("RETRIEVAL_PROFILES_JSON", "{}")
+    GRADE_CALIBRATION: bool = _bool("GRADE_CALIBRATION", False)
+    GRADE_MIN_SCORE: float = float(os.getenv("GRADE_MIN_SCORE", "0"))
+    GRADE_MIN_CONFIDENCE: float = float(os.getenv("GRADE_MIN_CONFIDENCE", "0"))
+    HYBRID_RERANKING: bool = _bool("HYBRID_RERANKING", False)
+    # Resolve explicitly named companies with entity-only searches, then run
+    # the normal query within those verified documents. Uses the existing index.
+    ENTITY_DOCUMENT_ROUTING: bool = _bool("ENTITY_DOCUMENT_ROUTING", False)
+    ENTITY_ROUTING_CANDIDATES: int = min(
+        10, max(1, int(os.getenv("ENTITY_ROUTING_CANDIDATES", "5")))
+    )
+    # Improve exact-match/F1 output shape without changing the corpus or
+    # retrieval index. Kept off by default so an isolated A/B run is possible.
+    ANSWER_SHAPE_GUIDANCE: bool = _bool("ANSWER_SHAPE_GUIDANCE", False)
+    # Keep ranked evidence from earlier reformulation attempts. The larger
+    # request-local evidence budget is used only after a retry has occurred.
+    RETRY_EVIDENCE_FUSION: bool = _bool("RETRY_EVIDENCE_FUSION", False)
+    RETRY_FUSION_MAX_HITS: int = min(
+        50, max(1, int(os.getenv("RETRY_FUSION_MAX_HITS", "10")))
+    )
     # Grading also requires the evidence to be tied to the company the question
     # names. On the stratified 10-question set it stopped A017 -- an unanswerable
     # Atlassian question answered from STMicroelectronics' table -- in every run,

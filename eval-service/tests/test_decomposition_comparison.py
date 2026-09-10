@@ -1,6 +1,7 @@
 import json
 
 import pytest
+
 from scripts.compare_decomposition_runs import compare_runs, load_run
 
 
@@ -53,3 +54,111 @@ def test_snapshot_validation_rejects_wrong_flag_and_mock_provider(tmp_path):
     (tmp_path / "run_info.json").write_text(json.dumps(info))
     with pytest.raises(ValueError, match="Mock-model"):
         load_run(tmp_path, True)
+
+
+def test_snapshot_validation_supports_hybrid_reranking(tmp_path):
+    info = {
+        "agent": {
+            "llm_provider": "anthropic",
+            "config": {
+                "query_decomposition": False,
+                "hybrid_reranking": True,
+                "top_k_final": 5,
+            },
+        }
+    }
+    (tmp_path / "run_info.json").write_text(json.dumps(info))
+    (tmp_path / "combined.json").write_text('{"results": []}')
+    loaded = load_run(tmp_path, True, "hybrid_reranking")
+    assert loaded["config"] == {
+        "provider": "anthropic",
+        "query_decomposition": False,
+        "top_k_final": 5,
+    }
+    with pytest.raises(ValueError, match="Unknown optimization"):
+        load_run(tmp_path, True, "unknown")
+
+
+def test_snapshot_validation_supports_answer_shape_guidance(tmp_path):
+    info = {
+        "agent": {
+            "llm_provider": "anthropic",
+            "config": {
+                "query_decomposition": False,
+                "hybrid_reranking": False,
+                "answer_shape_guidance": True,
+                "top_k_final": 5,
+            },
+        }
+    }
+    (tmp_path / "run_info.json").write_text(json.dumps(info))
+    (tmp_path / "combined.json").write_text('{"results": []}')
+
+    loaded = load_run(tmp_path, True, "answer_shape_guidance")
+
+    assert loaded["config"] == {
+        "provider": "anthropic",
+        "query_decomposition": False,
+        "hybrid_reranking": False,
+        "top_k_final": 5,
+    }
+
+
+def test_snapshot_validation_supports_retry_evidence_fusion(tmp_path):
+    info = {
+        "agent": {
+            "llm_provider": "anthropic",
+            "config": {
+                "query_decomposition": False,
+                "hybrid_reranking": False,
+                "answer_shape_guidance": False,
+                "retry_evidence_fusion": True,
+                "retry_fusion_max_hits": 10,
+                "top_k_final": 5,
+            },
+        }
+    }
+    (tmp_path / "run_info.json").write_text(json.dumps(info))
+    (tmp_path / "combined.json").write_text('{"results": []}')
+
+    loaded = load_run(tmp_path, True, "retry_evidence_fusion")
+
+    assert loaded["config"] == {
+        "provider": "anthropic",
+        "query_decomposition": False,
+        "hybrid_reranking": False,
+        "answer_shape_guidance": False,
+        "retry_fusion_max_hits": 10,
+        "top_k_final": 5,
+    }
+
+
+def test_snapshot_validation_supports_entity_document_routing(tmp_path):
+    info = {
+        "agent": {
+            "llm_provider": "anthropic",
+            "config": {
+                "query_decomposition": False,
+                "hybrid_reranking": False,
+                "answer_shape_guidance": False,
+                "retry_evidence_fusion": False,
+                "entity_document_routing": True,
+                "entity_routing_candidates": 5,
+                "top_k_final": 5,
+            },
+        }
+    }
+    (tmp_path / "run_info.json").write_text(json.dumps(info))
+    (tmp_path / "combined.json").write_text('{"results": []}')
+
+    loaded = load_run(tmp_path, True, "entity_document_routing")
+
+    assert loaded["config"] == {
+        "provider": "anthropic",
+        "query_decomposition": False,
+        "hybrid_reranking": False,
+        "answer_shape_guidance": False,
+        "retry_evidence_fusion": False,
+        "entity_routing_candidates": 5,
+        "top_k_final": 5,
+    }

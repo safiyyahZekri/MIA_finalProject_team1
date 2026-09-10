@@ -17,6 +17,7 @@ the first place. If ANSWER_VALIDATOR_URL is set, it will *also* call the
 validator directly and include its verdict in the response, which is
 convenient when running/demoing agent-service standalone.
 """
+
 from __future__ import annotations
 
 import logging
@@ -42,12 +43,40 @@ async def health():
         "top_k_final": settings.TOP_K_FINAL,
         "max_retries": settings.MAX_RETRIES,
         "query_decomposition": settings.QUERY_DECOMPOSITION,
+        "hybrid_reranking": settings.HYBRID_RERANKING,
+        "entity_document_routing": settings.ENTITY_DOCUMENT_ROUTING,
+        "entity_routing_candidates": settings.ENTITY_ROUTING_CANDIDATES,
+        "answer_shape_guidance": settings.ANSWER_SHAPE_GUIDANCE,
+        "retry_evidence_fusion": settings.RETRY_EVIDENCE_FUSION,
+        "retry_fusion_max_hits": settings.RETRY_FUSION_MAX_HITS,
         "grade_require_entity_match": settings.GRADE_REQUIRE_ENTITY_MATCH,
         "answer_format_fixes": settings.ANSWER_FORMAT_FIXES,
         "grade_company_context": settings.GRADE_COMPANY_CONTEXT,
         "grade_require_named_table": settings.GRADE_REQUIRE_NAMED_TABLE,
         "rank_fusion_merge": settings.RANK_FUSION_MERGE,
     }
+    body["config"].update(
+        {
+            name.lower(): getattr(settings, name)
+            for name in (
+                "TOP_K_OVERRETRIEVE",
+                "MIN_EVIDENCE_SCORE",
+                "ADAPTIVE_TOP_K",
+                "ADAPTIVE_TOP_K_MAX",
+                "EVIDENCE_DIVERSIFICATION",
+                "QUERY_EXPANSION",
+                "TABLE_QUERY_REWRITING",
+                "ADJACENT_EVIDENCE",
+                "ANSWER_REPAIR",
+                "ANSWER_NORMALIZATION",
+                "QUESTION_TYPE_RETRIEVAL",
+                "RETRIEVAL_PROFILES_JSON",
+                "GRADE_CALIBRATION",
+                "GRADE_MIN_SCORE",
+                "GRADE_MIN_CONFIDENCE",
+            )
+        }
+    )
     if settings.LLM_PROVIDER == "anthropic":
         body["config"].update(
             model=settings.ANTHROPIC_MODEL,
@@ -86,12 +115,17 @@ async def health():
                 "or the graph will fall back to the offline mock heuristic per call."
             )
     elif settings.LLM_PROVIDER == "groq":
-        from app.llm import GroqError, GroqLLM  # local import: avoid httpx.Client at module load
+        from app.llm import (  # local import: avoid httpx.Client at module load
+            GroqError,
+            GroqLLM,
+        )
 
         if not settings.GROQ_API_KEY:
             body["status"] = "degraded"
             body["groq"] = {"reachable": False, "model": settings.GROQ_MODEL}
-            body["hint"] = "GROQ_API_KEY is not set in .env -- get one from https://console.groq.com"
+            body["hint"] = (
+                "GROQ_API_KEY is not set in .env -- get one from https://console.groq.com"
+            )
         else:
             try:
                 reachable = GroqLLM().ping()
@@ -114,9 +148,13 @@ async def _call_validator(answer: dict) -> dict | None:
     try:
         async with httpx.AsyncClient(timeout=5) as client:
             resp = await client.post(
-                f"{settings.ANSWER_VALIDATOR_URL.rstrip('/')}/validate_answer", json=answer
+                f"{settings.ANSWER_VALIDATOR_URL.rstrip('/')}/validate_answer",
+                json=answer,
             )
-            return {"status_code": resp.status_code, "body": resp.json() if resp.content else None}
+            return {
+                "status_code": resp.status_code,
+                "body": resp.json() if resp.content else None,
+            }
     except httpx.HTTPError as exc:
         logger.warning("answer-validator-api call failed: %s", exc)
         return {"error": str(exc)}
@@ -125,7 +163,9 @@ async def _call_validator(answer: dict) -> dict | None:
 def _usage_summary(trace: list) -> dict:
     """LLM calls, tokens and approximate cost for one question, read from the
     per-call usage the graph already attaches to its trace steps."""
-    calls = [step["usage"] for step in trace if isinstance(step, dict) and step.get("usage")]
+    calls = [
+        step["usage"] for step in trace if isinstance(step, dict) and step.get("usage")
+    ]
     input_tokens = sum(usage.get("prompt_tokens") or 0 for usage in calls)
     output_tokens = sum(usage.get("completion_tokens") or 0 for usage in calls)
     cost_usd = None
@@ -162,7 +202,9 @@ async def _run_and_validate(req: AnswerRequest) -> dict:
         # Report it with its cause so a caller records an error -- never an
         # answer that could be scored as if the model had seen the question.
         logger.exception("agent run failed")
-        raise HTTPException(status_code=503, detail=f"{type(exc).__name__}: {exc}") from exc
+        raise HTTPException(
+            status_code=503, detail=f"{type(exc).__name__}: {exc}"
+        ) from exc
     answer = final_state.get("answer")
     if answer is None:
         # Should be unreachable: every graph path sets `answer`. Fail safe rather

@@ -33,6 +33,7 @@ async def test_agent_uses_compatible_vector_endpoint_and_normalized_score(monkey
         {
             "query": "What was operating income in 2022?",
             "top_k": 5,
+            "candidate_k": 30,
             "document_id": "tat-1",
         },
     )
@@ -59,3 +60,55 @@ async def test_agent_retrieval_paths_are_stable(monkeypatch, method, path):
 
     assert post.await_args.args[0] == path
 
+
+@pytest.mark.asyncio
+async def test_hybrid_request_uses_candidate_pool_reranking_and_document_scope(
+    monkeypatch,
+):
+    client = RetrievalClient()
+    post = AsyncMock(return_value=[])
+    monkeypatch.setattr(client, "_post", post)
+
+    await client.search_hybrid("revenue", top_k=5, candidate_k=3, document_id="doc")
+
+    post.assert_awaited_once_with(
+        "/search",
+        {
+            "query": "revenue",
+            "top_k": 5,
+            "candidate_k": 5,
+            "rerank": True,
+            "document_id": "doc",
+        },
+        require_reranked=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_hybrid_fails_visibly_when_service_did_not_rerank(monkeypatch):
+    client = RetrievalClient()
+
+    class Response:
+        content = b"{}"
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"reranked": False, "hits": [{"document_id": "d"}]}
+
+    class Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def post(self, *args, **kwargs):
+            return Response()
+
+    monkeypatch.setattr(
+        "app.retrieval_client.httpx.AsyncClient", lambda **kwargs: Client()
+    )
+    with pytest.raises(RuntimeError, match="reranked=false"):
+        await client.search_hybrid("revenue")

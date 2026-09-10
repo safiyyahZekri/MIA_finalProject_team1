@@ -516,17 +516,22 @@ class RetrievalEngine:
         lexical_confidence: float,
         fusion_score: float,
         reranker_score: float | None,
+        dense_weight: float = 0.55,
+        rrf_k: int = 60,
     ) -> float:
         dense_confidence = self._dense_confidence(dense_score)
-        fusion_confidence = _clamp(fusion_score * 61.0)
+        fusion_confidence = _clamp(fusion_score * (rrf_k + 1))
         if mode == SearchMode.dense:
             base = dense_confidence
         elif mode == SearchMode.lexical:
             base = lexical_confidence
         else:
+            # Preserve the established 0.55/0.35 calibration at the default
+            # fusion weight, while keeping nonnegative weights at the extremes.
+            calibrated_dense_weight = 0.9 * dense_weight / (dense_weight + (1 - dense_weight) * 7 / 9)
             base = _clamp(
-                0.55 * dense_confidence
-                + 0.35 * lexical_confidence
+                calibrated_dense_weight * dense_confidence
+                + (0.90 - calibrated_dense_weight) * lexical_confidence
                 + 0.10 * fusion_confidence
             )
         if reranker_score is not None:
@@ -607,6 +612,8 @@ class RetrievalEngine:
 
     def search(self, request: SearchRequest) -> SearchResponse:
         started = time.perf_counter()
+        search_settings = {"dense_weight": request.dense_weight, "rrf_k": request.rrf_k,
+                           "top_k": request.top_k, "candidate_k": request.candidate_k}
         timings: dict[str, float] = {}
         with self._lock:
             stage_started = time.perf_counter()
@@ -626,6 +633,7 @@ class RetrievalEngine:
                     latency_ms=latency,
                     hits=[],
                     diagnostics=SearchDiagnostics(
+                        search_settings=search_settings,
                         eligible_count=0, stage_latency_ms=timings
                     ),
                 )
@@ -681,9 +689,9 @@ class RetrievalEngine:
             fusion: dict[int, float] = defaultdict(float)
             for index in candidate_union:
                 if index in dense_ranks:
-                    fusion[index] += 0.55 / (60 + dense_ranks[index])
+                    fusion[index] += request.dense_weight / (request.rrf_k + dense_ranks[index])
                 if index in lexical_ranks:
-                    fusion[index] += 0.45 / (60 + lexical_ranks[index])
+                    fusion[index] += (1 - request.dense_weight) / (request.rrf_k + lexical_ranks[index])
             candidates = sorted(
                 candidate_union, key=lambda index: (-fusion[index], index)
             )[: request.candidate_k]
@@ -714,6 +722,8 @@ class RetrievalEngine:
                     lexical_confidences.get(index, 0.0),
                     fusion[index],
                     reranker_scores.get(index),
+                    request.dense_weight,
+                    request.rrf_k,
                 )
                 for index in candidates
             }
@@ -745,6 +755,7 @@ class RetrievalEngine:
             latency_ms=latency,
             hits=hits,
             diagnostics=SearchDiagnostics(
+                search_settings=search_settings,
                 eligible_count=len(eligible),
                 dense_candidate_count=len(dense_order),
                 lexical_candidate_count=len(lexical_order),

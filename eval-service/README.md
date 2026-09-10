@@ -17,6 +17,14 @@ Service #5 in the LEDGER architecture — Evaluation & Observability. Two jobs:
    per question so every result is diagnosable regardless of whether
    agent-service's own tracing is wired up.
 
+No-preprocessing accuracy experiments are documented in
+[`QUERY_DECOMPOSITION_EXPERIMENT.md`](QUERY_DECOMPOSITION_EXPERIMENT.md),
+[`RETRIEVAL_OPTIMIZATION_EXPERIMENT.md`](RETRIEVAL_OPTIMIZATION_EXPERIMENT.md),
+[`ANSWER_SHAPE_EXPERIMENT.md`](ANSWER_SHAPE_EXPERIMENT.md), and
+[`RETRY_EVIDENCE_FUSION_EXPERIMENT.md`](RETRY_EVIDENCE_FUSION_EXPERIMENT.md).
+Each feature is off by default and recorded in the agent health snapshot for
+controlled runs.
+
 ## Run it
 
 ```bash

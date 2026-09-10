@@ -1,4 +1,6 @@
 import pytest
+from pydantic import ValidationError
+
 from app import graph
 from app.decomposition import QueryPlan, merge_query_results
 from app.llm import (
@@ -9,7 +11,6 @@ from app.llm import (
     OllamaLLM,
 )
 from app.main import _usage_summary
-from pydantic import ValidationError
 
 
 def hit(doc, score=0.9, chunk="1"):

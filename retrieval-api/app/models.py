@@ -146,6 +146,8 @@ class SearchRequest(BaseModel):
     top_k: int = Field(default=5, ge=1, le=50)
     candidate_k: int = Field(default=30, ge=1, le=250)
     mode: SearchMode = SearchMode.hybrid
+    dense_weight: float = Field(default=0.55, ge=0, le=1, allow_inf_nan=False)
+    rrf_k: int = Field(default=60, ge=1, le=200)
     rerank: bool = True
     include_parent_context: bool = True
     filters: SearchFilters = Field(default_factory=SearchFilters)
@@ -233,6 +235,7 @@ class SearchHit(BaseModel):
 
 
 class SearchDiagnostics(BaseModel):
+    search_settings: dict[str, float | int] = Field(default_factory=dict)
     eligible_count: int = 0
     dense_candidate_count: int = 0
     lexical_candidate_count: int = 0

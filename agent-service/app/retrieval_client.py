@@ -4,6 +4,8 @@ Thin async client for retrieval-api.
 Expected retrieval-api contract (documented for the retrieval-api owner too):
 
   POST {RETRIEVAL_API_URL}/search/vector   {"query": str, "top_k": int, "document_id": str|None}
+  POST {RETRIEVAL_API_URL}/search          {"query": str, "top_k": int, "candidate_k": int,
+                                             "rerank": bool, "document_id": str|None}
   POST {RETRIEVAL_API_URL}/search/bm25     {"query": str, "top_k": int, "document_id": str|None}
   POST {RETRIEVAL_API_URL}/search/tables   {"query": str, "top_k": int, "document_id": str|None}
   POST {RETRIEVAL_API_URL}/filter          {"metadata": dict, "top_k": int}
@@ -20,6 +22,7 @@ If retrieval-api is unreachable (e.g. being developed in parallel by a
 teammate) and RETRIEVAL_FALLBACK_TO_MOCK is on, we fall back to a tiny local
 corpus so this service is independently runnable and demoable.
 """
+
 from __future__ import annotations
 
 from typing import List, Optional
@@ -66,9 +69,39 @@ _MOCK_CORPUS = [
 
 
 _STOPWORDS = {
-    "the", "a", "an", "is", "was", "were", "in", "on", "at", "to", "of", "and",
-    "or", "for", "what", "which", "how", "by", "from", "that", "this", "with",
-    "as", "it", "its", "did", "do", "does", "are", "be", "than", "much", "many",
+    "the",
+    "a",
+    "an",
+    "is",
+    "was",
+    "were",
+    "in",
+    "on",
+    "at",
+    "to",
+    "of",
+    "and",
+    "or",
+    "for",
+    "what",
+    "which",
+    "how",
+    "by",
+    "from",
+    "that",
+    "this",
+    "with",
+    "as",
+    "it",
+    "its",
+    "did",
+    "do",
+    "does",
+    "are",
+    "be",
+    "than",
+    "much",
+    "many",
 }
 
 
@@ -77,7 +110,9 @@ def _meaningful_words(text: str) -> List[str]:
     return [w for w in cleaned if w and w not in _STOPWORDS and len(w) > 2]
 
 
-def _mock_search(query: str, top_k: int, content_type: Optional[str] = None) -> List[dict]:
+def _mock_search(
+    query: str, top_k: int, content_type: Optional[str] = None
+) -> List[dict]:
     """Keyword-overlap scoring against the tiny offline corpus. Deliberately
     conservative: queries with no real lexical overlap score near zero, so
     the grading step correctly reports insufficient evidence for questions
@@ -101,52 +136,150 @@ class RetrievalClient:
         self.base_url = settings.RETRIEVAL_API_URL.rstrip("/")
         self.timeout = settings.RETRIEVAL_TIMEOUT_S
 
-    async def _post(self, path: str, payload: dict) -> List[dict]:
+    async def _post(
+        self,
+        path: str,
+        payload: dict,
+        *,
+        require_reranked: bool = False,
+        expected_search_settings: dict | None = None,
+    ) -> List[dict]:
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 resp = await client.post(f"{self.base_url}{path}", json=payload)
                 resp.raise_for_status()
                 data = resp.json()
-                return data.get("hits", [])
+                hits = data.get("hits", [])
+                if expected_search_settings is not None:
+                    applied = data.get("diagnostics", {}).get("search_settings", {})
+                    if any(
+                        applied.get(key) != value
+                        for key, value in expected_search_settings.items()
+                    ):
+                        raise RuntimeError(
+                            "Retrieval did not apply the requested tuning settings; update retrieval-api"
+                        )
+                if not isinstance(hits, list):
+                    raise ValueError("retrieval response 'hits' must be a list")
+                if require_reranked and hits and data.get("reranked") is not True:
+                    raise RuntimeError(
+                        "HYBRID_RERANKING requires retrieval-api reranking, "
+                        "but the service returned reranked=false"
+                    )
+                return hits
         except (httpx.HTTPError, ValueError) as exc:
             if settings.RETRIEVAL_FALLBACK_TO_MOCK:
                 return None  # signal caller to use mock fallback
             raise RuntimeError(f"retrieval-api call to {path} failed: {exc}") from exc
 
     async def search_documents(
-        self, query: str, top_k: int = None, document_id: Optional[str] = None
+        self,
+        query: str,
+        top_k: int = None,
+        document_id: Optional[str] = None,
+        candidate_k: int | None = None,
     ) -> List[dict]:
         """Corpus-wide semantic (vector) retrieval."""
         top_k = top_k or settings.TOP_K_FINAL
         hits = await self._post(
             "/search/vector",
-            {"query": query, "top_k": top_k, "document_id": document_id},
+            {
+                "query": query,
+                "top_k": top_k,
+                "candidate_k": max(top_k, candidate_k or settings.TOP_K_OVERRETRIEVE),
+                "document_id": document_id,
+            },
+        )
+        if hits is None:
+            hits = _mock_search(query, top_k)
+        return hits
+
+    async def search_hybrid(
+        self,
+        query: str,
+        top_k: int = None,
+        candidate_k: int = None,
+        document_id: Optional[str] = None,
+        rerank: bool = True,
+        dense_weight: float | None = None,
+        rrf_k: int | None = None,
+    ) -> List[dict]:
+        """Retrieval-api-owned dense+BM25 fusion and optional reranking."""
+        top_k = top_k or settings.TOP_K_FINAL
+        candidate_k = candidate_k or settings.TOP_K_OVERRETRIEVE
+        # SearchRequest rejects candidate_k < top_k. Keeping normalization here
+        # also makes unusual local test/tuning values a valid service request.
+        candidate_k = max(candidate_k, top_k)
+        hits = await self._post(
+            "/search",
+            {
+                "query": query,
+                "top_k": top_k,
+                "candidate_k": candidate_k,
+                "rerank": rerank,
+                "document_id": document_id,
+                **({"dense_weight": dense_weight} if dense_weight is not None else {}),
+                **({"rrf_k": rrf_k} if rrf_k is not None else {}),
+            },
+            require_reranked=rerank,
+            **(
+                {
+                    "expected_search_settings": {
+                        **(
+                            {"dense_weight": dense_weight}
+                            if dense_weight is not None
+                            else {}
+                        ),
+                        **({"rrf_k": rrf_k} if rrf_k is not None else {}),
+                    }
+                }
+                if dense_weight is not None or rrf_k is not None
+                else {}
+            ),
         )
         if hits is None:
             hits = _mock_search(query, top_k)
         return hits
 
     async def search_bm25(
-        self, query: str, top_k: int = None, document_id: Optional[str] = None
+        self,
+        query: str,
+        top_k: int = None,
+        document_id: Optional[str] = None,
+        candidate_k: int | None = None,
     ) -> List[dict]:
         """Non-vector (lexical) retrieval -- required alongside embeddings."""
         top_k = top_k or settings.TOP_K_FINAL
         hits = await self._post(
             "/search/bm25",
-            {"query": query, "top_k": top_k, "document_id": document_id},
+            {
+                "query": query,
+                "top_k": top_k,
+                "candidate_k": max(top_k, candidate_k or settings.TOP_K_OVERRETRIEVE),
+                "document_id": document_id,
+            },
         )
         if hits is None:
             hits = _mock_search(query, top_k)
         return hits
 
     async def search_tables(
-        self, query: str, top_k: int = None, document_id: Optional[str] = None
+        self,
+        query: str,
+        top_k: int = None,
+        document_id: Optional[str] = None,
+        candidate_k: int | None = None,
     ) -> List[dict]:
         """Table-aware retrieval."""
         top_k = top_k or settings.TOP_K_FINAL
         hits = await self._post(
             "/search/tables",
-            {"query": query, "top_k": top_k, "document_id": document_id},
+            {
+                "query": query,
+                "top_k": top_k,
+                "candidate_k": max(top_k, candidate_k or settings.TOP_K_OVERRETRIEVE),
+                "document_id": document_id,
+            },
         )
         if hits is None:
             hits = _mock_search(query, top_k, content_type="table")
@@ -158,7 +291,9 @@ class RetrievalClient:
         hits = await self._post("/filter", {"metadata": metadata, "top_k": top_k})
         if hits is None:
             doc_id = metadata.get("document_id")
-            hits = [c for c in _MOCK_CORPUS if not doc_id or c["document_id"] == doc_id][:top_k]
+            hits = [
+                c for c in _MOCK_CORPUS if not doc_id or c["document_id"] == doc_id
+            ][:top_k]
         return hits
 
 

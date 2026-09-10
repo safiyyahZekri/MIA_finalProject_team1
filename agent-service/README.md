@@ -33,7 +33,77 @@ document IDs, and the merged ranking without adding full document text.
 Follow the [off/on experiment guide](../eval-service/QUERY_DECOMPOSITION_EXPERIMENT.md)
 to measure EM/F1 changes using the existing corpus.
 
+## Hybrid fusion and reranking (optional, no preprocessing)
+
+Set `HYBRID_RERANKING=true` to route retrieval through retrieval-api's
+existing `/search` pipeline. That pipeline retrieves 30 candidates by dense
+and BM25 search, fuses their ranks, applies its cross-encoder, and returns five
+calibrated hits. Text questions use that final ranking directly; numerical
+and table questions also retain the table-filtered view.
+
+The agent requires `reranked=true` when this mode returns hits. If the shared
+retrieval service has its reranker disabled, the request fails visibly rather
+than recording a hybrid-only run as a reranking result. The setting is off by
+default until the controlled comparison is run.
+
+Use the [combined optimization experiment](../eval-service/RETRIEVAL_OPTIMIZATION_EXPERIMENT.md)
+to test baseline, each optimization alone, and both together.
+
+## Answer-shape guidance (optional, no preprocessing)
+
+Set `ANSWER_SHAPE_GUIDANCE=true` to improve how the model formats answers that
+already have useful evidence. It does not change retrieval, re-index documents,
+or add another model call. The extraction prompt then distinguishes one answer
+with several clauses from a true multi-value answer, keeps support-page numbers
+in citations, preserves financial units/scales, retains material qualifiers,
+and asks for full organization names.
+
+This targets the audited "right content, wrong form" failures directly. It is
+off by default because the actual EM/F1 change must be measured with the same
+model and corpus. Follow the [answer-shape experiment](../eval-service/ANSWER_SHAPE_EXPERIMENT.md)
+before enabling it for the final run.
+
+## Retry evidence fusion (optional, no preprocessing)
+
+Set `RETRY_EVIDENCE_FUSION=true` to retain ranked passages from earlier query
+reformulation attempts instead of replacing them on every retry. Once a retry
+occurs, reciprocal-rank fusion combines the request-local attempt rankings and
+passes at most `RETRY_FUSION_MAX_HITS` passages (default 10) to grading.
+
+The saved full-100 audit showed seven questions where a gold document appeared
+in an earlier attempt but disappeared from the final attempt. Five of those
+questions ended in an answerable abstention. This switch addresses that exact
+loss mechanism. It does not alter the shared index and adds no retrieval or LLM
+calls, although grading/extraction can receive more evidence and therefore use
+more input tokens after a retry.
+
+The switch is off by default. Use the
+[retry-fusion experiment](../eval-service/RETRY_EVIDENCE_FUSION_EXPERIMENT.md)
+to measure EM/F1, abstentions, latency, and cost before combining it with the
+other optimizations.
+
+## Entity-first document routing (optional, no preprocessing)
+
+Set `ENTITY_DOCUMENT_ROUTING=true` to extract explicitly named organizations
+during the existing classification call. The agent runs entity-only dense and
+BM25 searches, accepts a candidate only when its returned content actually
+contains the entity, then searches the normal metric query within that verified
+document. Multi-company questions reserve evidence from each resolved document.
+
+This addresses the audited corpus-wide misses where common financial line items
+from the wrong company outranked the named company's report. It does not use
+gold IDs, hard-coded company aliases, another LLM call, or any index changes.
+Explicit `document_id` scopes still take priority. The switch is off by default;
+use the [entity-routing experiment](../eval-service/ENTITY_DOCUMENT_ROUTING_EXPERIMENT.md)
+before combining it with the other optimizations.
+
 ## Run it right now (zero config)
+
+Additional optional search-time improvements—adaptive Top-K, diversification,
+query expansion, table queries, adjacent context, grading gates, per-type
+profiles, constrained answer repair and normalization—have switches and trial
+commands in [No-preprocessing experiments](../eval-service/NO_PREPROCESSING_OPTIMIZATIONS.md).
+All are disabled by default and use the existing index.
 
 ```bash
 cd agent-service
@@ -59,7 +129,7 @@ curl -X POST http://localhost:8003/answer \
   -d '{"question": "What was the percentage change in operating expenses from 2020 to 2021?"}'
 ```
 
-Run the test suite (11 tests, fully offline, ~1s):
+Run the fully offline test suite:
 
 ```bash
 pytest tests/ -v --asyncio-mode=auto
