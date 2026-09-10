@@ -51,6 +51,12 @@ def answer_shape_rules() -> str:
     This is feature-gated because prompt changes must be evaluated against the
     same question set and index. It does not inspect gold answers or dataset
     identifiers and does not add an LLM call.
+
+    Every rule here must agree with copying the source exactly, because gold
+    answers are spans copied from the evidence. Two earlier rules did not and
+    were removed: "include the unit or scale with each value" turned the cell
+    "4,225" into "$4,225 million" (A034), and "copy the complete clause" added
+    "adjusted" to the span "due to the adoption of ASC 606" (A013).
     """
     if not settings.ANSWER_SHAPE_GUIDANCE:
         return ""
@@ -64,24 +70,26 @@ def answer_shape_rules() -> str:
         "- If the question asks which page supports an answer, represent the page through "
         "the evidence citation/evidence_indexes; never include a page number in value or "
         "values.\n"
-        "- Copy the complete contiguous phrase or clause needed to answer. Keep material "
-        "qualifiers such as time scope and causal wording; omit unrelated surrounding prose.\n"
-        "- For money and quantities, preserve the currency, unit, and scale stated in the "
-        "evidence. If one unit or scale applies to several requested values, include it with "
-        "each value so every answer is unambiguous.\n"
         "- When identifying a company or organization, use its full name as written in the "
         "evidence rather than shortening it to an acronym.\n"
         "Do not add facts or explanation that are absent from the evidence.\n"
     )
 
 
+COPY_RULE = (
+    "Copy each value exactly as it is written in the evidence, as the shortest "
+    "span that answers the question. Do not add labels, years, units, currency "
+    "symbols or explanation that are not part of that span.\n"
+)
+
+
 def anthropic_answer_copy_rules() -> str:
-    """Keep Anthropic's established baseline prompt when guidance is off."""
-    return answer_shape_rules() or (
-        "Copy each value exactly as it is written in the evidence, as the shortest "
-        "span that answers the question. Do not add labels, years, units, currency "
-        "symbols or explanation that are not part of that span.\n"
-    )
+    """The copy rule always applies; answer-shape guidance only adds to it.
+
+    No switch may replace COPY_RULE: gold answers copy the source, so an answer
+    that rewords or adds to the span is scored wrong even when its fact is right.
+    """
+    return COPY_RULE + answer_shape_rules()
 
 
 def _looks_like_year(raw_digits: str, value: float) -> bool:

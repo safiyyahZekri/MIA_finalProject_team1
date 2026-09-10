@@ -43,8 +43,19 @@ def test_guidance_targets_observed_answer_shape_failures(monkeypatch):
     assert "Use direct for one requested fact" in rules
     assert "Use multi_span only when the question explicitly requests multiple" in rules
     assert "never include a page number in value or values" in rules
-    assert "currency, unit, and scale" in rules
     assert "full name as written" in rules
+
+
+def test_guidance_never_asks_for_text_the_source_span_does_not_have(monkeypatch):
+    """Gold answers copy the source. "Include the unit with each value" turned
+    the cell "4,225" into "$4,225 million" (A034), and "copy the complete
+    clause" added "adjusted" to "due to the adoption of ASC 606" (A013)."""
+    monkeypatch.setattr(llm_module.settings, "ANSWER_SHAPE_GUIDANCE", True)
+    rules = answer_shape_rules()
+
+    assert "include it with each value" not in rules
+    assert "currency, unit, and scale" not in rules
+    assert "complete contiguous phrase or clause" not in rules
 
 
 @pytest.mark.parametrize("provider_cls", [OllamaLLM, GroqLLM])
@@ -60,7 +71,7 @@ def test_json_providers_receive_guidance_only_when_enabled(monkeypatch, provider
     assert "evidence citation/evidence_indexes" in prompt
 
 
-def test_anthropic_uses_guidance_without_conflicting_shortest_span_rule(monkeypatch):
+def test_anthropic_keeps_the_copy_rule_when_guidance_is_on(monkeypatch):
     provider = AnthropicLLM.__new__(AnthropicLLM)
     prompts = []
 
@@ -73,9 +84,11 @@ def test_anthropic_uses_guidance_without_conflicting_shortest_span_rule(monkeypa
 
     provider.extract("Why did the expense increase?", "text", EVIDENCE)
 
-    assert "answer-shape rules" in prompts[0]
-    assert "shortest span" not in prompts[0]
-    assert "Set evidence_indexes" in prompts[0]
+    prompt = prompts[0]
+    assert "shortest span" in prompt
+    assert "answer-shape rules" in prompt
+    assert prompt.index("Copy each value exactly") < prompt.index("answer-shape rules")
+    assert "Set evidence_indexes" in prompt
 
 
 def test_anthropic_baseline_prompt_is_preserved_when_disabled(monkeypatch):
