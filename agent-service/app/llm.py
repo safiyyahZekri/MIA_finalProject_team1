@@ -18,6 +18,8 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
+import time
 from typing import List, Literal, Optional
 
 import httpx
@@ -865,39 +867,123 @@ def _enum_name(value) -> Optional[str]:
     return None if value is None else getattr(value, "name", str(value))
 
 
+class GeminiQuotaExhausted(RuntimeError):
+    """No configured Gemini key can take a request: none is set, or every one
+    has used its daily quota."""
+
+
+# Shared by every GeminiLLM instance: the graph builds a new LLM for each
+# question, and a key that ran out must stay skipped across questions.
+_GEMINI_KEY_LOCK = threading.Lock()
+_GEMINI_EXHAUSTED_UNTIL: dict = {}
+_RETRY_DELAY_RE = re.compile(r"retryDelay['\"]?\s*:\s*['\"]?(\d+(?:\.\d+)?)s")
+
+
+def gemini_keys() -> List[str]:
+    """Configured keys in order: GEMINI_API_KEYS (comma-separated), then GEMINI_API_KEY."""
+    keys = [key.strip() for key in settings.GEMINI_API_KEYS.split(",")]
+    keys.append(settings.GEMINI_API_KEY.strip())
+    return list(dict.fromkeys(key for key in keys if key))
+
+
+def gemini_keys_exhausted() -> int:
+    """How many configured keys are waiting out a daily quota."""
+    now = time.monotonic()
+    with _GEMINI_KEY_LOCK:
+        return sum(1 for key in gemini_keys() if _GEMINI_EXHAUSTED_UNTIL.get(key, 0) > now)
+
+
+def _retry_delay_s(message: str) -> float:
+    match = _RETRY_DELAY_RE.search(message)
+    return min(60.0, max(2.0, float(match.group(1)) + 1.0)) if match else 30.0
+
+
 class GeminiLLM(_PromptedLLM):
     """Gemini through Google's official google-genai SDK, with JSON-schema
     structured output. Same prompts and failure handling as AnthropicLLM.
 
       * Structured output sends `response_mime_type="application/json"` with
         the pydantic model's JSON schema as `response_json_schema`.
-      * Rate limits and transient server errors are retried inside the SDK with
-        exponential backoff (GEMINI_MAX_ATTEMPTS tries in total), so a free
-        tier's per-minute limit becomes a wait. A limit that outlasts the
-        retries -- a daily quota -- propagates and is recorded as an error.
+      * Several keys can be configured (GEMINI_API_KEYS). A daily quota on one
+        moves the request to the next; a per-minute limit waits the delay
+        Google names. When every key has used its daily quota the error
+        propagates and the question is recorded as an error. Transient
+        server errors are retried inside the SDK.
       * A blocked prompt, or a candidate that stopped for any reason other than
         STOP, raises ModelOutputError: output cut off at max_output_tokens
         (which thinking also consumes) or withheld for safety is not an answer.
       * Thinking tokens are billed as output, so they count as completion tokens.
     """
 
-    RETRY_STATUS_CODES = (429, 500, 502, 503, 504)
+    # 429 is handled in _generate, where a per-minute limit and a daily quota
+    # can be told apart; the SDK would retry an exhausted key for minutes.
+    RETRY_STATUS_CODES = (500, 502, 503, 504)
 
     def __init__(self) -> None:
         from google import genai  # local import by design: the mock path needs no SDK
 
-        self._client = genai.Client(
-            api_key=settings.GEMINI_API_KEY,
-            http_options={
-                "retry_options": {
-                    "attempts": settings.GEMINI_MAX_ATTEMPTS,
-                    "initial_delay": 2.0,
-                    "max_delay": 60.0,
-                    "http_status_codes": list(self.RETRY_STATUS_CODES),
-                }
-            },
-        )
+        self._genai = genai
+        self._clients: dict = {}
         self.last_usage: dict = {}
+
+    def _client_for(self, key: str):
+        if key not in self._clients:
+            self._clients[key] = self._genai.Client(
+                api_key=key,
+                http_options={
+                    "retry_options": {
+                        "attempts": settings.GEMINI_MAX_ATTEMPTS,
+                        "initial_delay": 2.0,
+                        "max_delay": 60.0,
+                        "http_status_codes": list(self.RETRY_STATUS_CODES),
+                    }
+                },
+            )
+        return self._clients[key]
+
+    def _generate(self, **request):
+        """generate_content on the first key with quota left.
+
+        A daily quota marks the key exhausted for GEMINI_EXHAUSTED_KEY_RETRY_S
+        and moves on to the next key. A per-minute limit waits the delay the
+        error names and retries the same key, up to GEMINI_MAX_ATTEMPTS times.
+        Keys are logged by position, never by value.
+        """
+        keys = gemini_keys()
+        if not keys:
+            raise GeminiQuotaExhausted("no Gemini API key is configured: set GEMINI_API_KEY or GEMINI_API_KEYS")
+        waits = 0
+        # A key that ran out during this request is not tried again in it,
+        # whatever GEMINI_EXHAUSTED_KEY_RETRY_S is: no loop over spent keys.
+        spent: set = set()
+        while True:
+            now = time.monotonic()
+            with _GEMINI_KEY_LOCK:
+                available = [
+                    key for key in keys if key not in spent and _GEMINI_EXHAUSTED_UNTIL.get(key, 0) <= now
+                ]
+            if not available:
+                raise GeminiQuotaExhausted(f"all {len(keys)} Gemini API key(s) have used their daily quota")
+            key = available[0]
+            try:
+                return self._client_for(key).models.generate_content(**request)
+            except Exception as exc:
+                if getattr(exc, "code", None) != 429:
+                    raise
+                message = str(exc)
+                position = keys.index(key) + 1
+                if "PerDay" in message:
+                    spent.add(key)
+                    with _GEMINI_KEY_LOCK:
+                        _GEMINI_EXHAUSTED_UNTIL[key] = time.monotonic() + settings.GEMINI_EXHAUSTED_KEY_RETRY_S
+                    logger.warning("Gemini key %d of %d used its daily quota; trying the next key", position, len(keys))
+                    continue
+                waits += 1
+                if waits >= settings.GEMINI_MAX_ATTEMPTS:
+                    raise
+                delay = _retry_delay_s(message)
+                logger.info("Gemini key %d of %d hit a per-minute limit; waiting %.0f s", position, len(keys), delay)
+                time.sleep(delay)
 
     def _create(self, prompt: str, schema=None) -> str:
         """One request; returns the answer text once it is known to be complete."""
@@ -909,9 +995,7 @@ class GeminiLLM(_PromptedLLM):
             config["response_json_schema"] = schema.model_json_schema()
 
         self.last_usage = {}
-        response = self._client.models.generate_content(
-            model=settings.GEMINI_MODEL, contents=prompt, config=config
-        )
+        response = self._generate(model=settings.GEMINI_MODEL, contents=prompt, config=config)
 
         usage = getattr(response, "usage_metadata", None)
         if usage is not None:

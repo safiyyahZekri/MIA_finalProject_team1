@@ -61,7 +61,12 @@ async def health():
             max_output_tokens=settings.GEMINI_MAX_OUTPUT_TOKENS,
             temperature=settings.GEMINI_TEMPERATURE,
         )
-        if not settings.GEMINI_API_KEY:
+        from app.llm import gemini_keys, gemini_keys_exhausted  # local import, like the other providers
+
+        keys = gemini_keys()
+        # Counts only: key values never leave the service.
+        body["gemini"] = {"api_keys": len(keys), "keys_out_of_daily_quota": gemini_keys_exhausted()}
+        if not keys:
             body["status"] = "degraded"
             body["hint"] = "GEMINI_API_KEY is not set in .env -- create a key in Google AI Studio"
     if settings.LLM_PROVIDER == "ollama":

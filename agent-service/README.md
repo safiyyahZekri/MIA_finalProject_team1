@@ -255,8 +255,11 @@ agent-service/
 
 `LLM_PROVIDER=gemini` runs the agent on Google Gemini through the official
 `google-genai` SDK, with the same prompts and failure handling as the
-Anthropic provider. Set `GEMINI_API_KEY` (a Google AI Studio key) and
-optionally `GEMINI_MODEL`, `GEMINI_TEMPERATURE`, `GEMINI_MAX_OUTPUT_TOKENS`
+Anthropic provider. Set `GEMINI_API_KEY` (a Google AI Studio key), or list
+several in `GEMINI_API_KEYS` (comma-separated): a key that uses its daily
+quota hands over to the next, and a per-minute limit waits the delay Google
+names. Keys from the same Google project share one quota. Optionally set
+`GEMINI_MODEL`, `GEMINI_TEMPERATURE`, `GEMINI_MAX_OUTPUT_TOKENS`
 and `GEMINI_MAX_ATTEMPTS`. Rate limits are retried with backoff inside the
 SDK; truncated or blocked output is reported as an error, not an answer.
 

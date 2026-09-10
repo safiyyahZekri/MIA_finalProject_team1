@@ -58,6 +58,10 @@ class Settings:
     # A key from Google AI Studio. GOOGLE_API_KEY, the name the SDK itself
     # looks for, is accepted too.
     GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "") or os.getenv("GOOGLE_API_KEY", "")
+    # More keys, comma-separated, tried in order when one has used its daily
+    # quota. Google counts quota per project, so keys from the same project
+    # share one quota and only keys from different projects add capacity.
+    GEMINI_API_KEYS: str = os.getenv("GEMINI_API_KEYS", "")
     GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
     # Thinking models spend part of this cap on thinking; too small a cap
     # truncates the answer, which is reported as an error.
@@ -66,9 +70,11 @@ class Settings:
     # alike, which helps small before/after experiments; follow the chosen
     # model's guidance, since some are tuned for their default.
     GEMINI_TEMPERATURE: float | None = _float_or_none("GEMINI_TEMPERATURE")
-    # Tries per request, including the first. 429 and 5xx responses are
-    # retried with exponential backoff up to 60 s between tries.
+    # Tries per request, including the first: server errors are retried with
+    # exponential backoff, and a per-minute limit waits the delay Google names.
     GEMINI_MAX_ATTEMPTS: int = int(os.getenv("GEMINI_MAX_ATTEMPTS", "8"))
+    # Seconds before a key that used its daily quota is tried again.
+    GEMINI_EXHAUSTED_KEY_RETRY_S: float = float(os.getenv("GEMINI_EXHAUSTED_KEY_RETRY_S", "3600"))
     # USD per million tokens for the cost report. Both 0 (a free-tier key)
     # reports no cost.
     GEMINI_INPUT_USD_PER_MTOK: float = float(os.getenv("GEMINI_INPUT_USD_PER_MTOK", "0"))
