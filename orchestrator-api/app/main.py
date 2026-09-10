@@ -1,6 +1,7 @@
 import hashlib
 import json
 import logging
+import os
 import time
 from typing import Annotated
 
@@ -9,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
 from app import clients, document_store, review_store
+from app.semantic_cache import SemanticCache
 from app.schemas import (
     AskRequest,
     AskResponse,
@@ -34,10 +36,19 @@ app.add_middleware(
 
 recent_queries: list[dict] = []
 
+# A repeated or reworded question about the same document is answered from
+# here instead of running the agent again (see app/semantic_cache.py).
+ASK_CACHE_ENABLED = os.getenv("ASK_CACHE_ENABLED", "true").lower() == "true"
+answer_cache = SemanticCache(max_entries=int(os.getenv("ASK_CACHE_MAX_ENTRIES", "500")))
+
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "mock_mode": clients.MOCK_MODE}
+    return {
+        "status": "ok",
+        "mock_mode": clients.MOCK_MODE,
+        "answer_cache": {"enabled": ASK_CACHE_ENABLED, **answer_cache.stats()},
+    }
 
 
 @app.post("/documents/ingest", response_model=IngestResponse)
@@ -101,6 +112,9 @@ async def ingest_document(
             },
         ) from exc
 
+    # The index changed, so a cached answer may no longer match its evidence.
+    answer_cache.clear()
+
     try:
         document_store.save_pdf(document_id, content)
     except OSError as exc:
@@ -129,12 +143,23 @@ async def ingest_document(
 async def ask(request: AskRequest):
     start = time.perf_counter()
 
+    if ASK_CACHE_ENABLED:
+        cached = answer_cache.get(request.question, request.document_id)
+        if cached is not None:
+            response, match = cached
+            latency_ms = round((time.perf_counter() - start) * 1000, 1)
+            recent_queries.append(
+                {"question": request.question, "latency_ms": latency_ms, "valid": True, "cache": match}
+            )
+            logger.info("[ANSWER-CACHE] %s match for %r", match, request.question)
+            return response.model_copy(update={"cache_hit": True, "cache_match": match})
+
     answer = await clients.ask_agent(request.question, request.document_id)
     validation = await clients.validate_answer(answer)
 
     latency_ms = round((time.perf_counter() - start) * 1000, 1)
     recent_queries.append(
-        {"question": request.question, "latency_ms": latency_ms, "valid": validation["valid"]}
+        {"question": request.question, "latency_ms": latency_ms, "valid": validation["valid"], "cache": None}
     )
 
     if validation["valid"]:
@@ -147,7 +172,7 @@ async def ask(request: AskRequest):
         logger.error("[ANSWER-VALIDATOR-ERROR] %s", validation["reason"])
         raise HTTPException(status_code=422, detail=validation["reason"])
 
-    return AskResponse(
+    response = AskResponse(
         answer_type=answer["answer_type"],
         evidence=answer["evidence"],
         params=answer["params"],
@@ -155,6 +180,10 @@ async def ask(request: AskRequest):
         validator_message=validation["reason"],
         evidence_boxes=await clients.evidence_boxes(answer["evidence"]),
     )
+    # Only validated answers reach this point; a rejected one raised above.
+    if ASK_CACHE_ENABLED:
+        answer_cache.put(request.question, request.document_id, response)
+    return response
 
 
 @app.get("/documents")
@@ -190,11 +219,14 @@ async def correct_extracted_field(
     document_id: str, correction: ExtractionCorrectionRequest
 ):
     try:
-        return await clients.apply_extraction_correction(
+        record = await clients.apply_extraction_correction(
             document_id, correction.model_dump()
         )
     except clients.ServiceIntegrationError as exc:
         raise _correction_error(exc) from exc
+    # The corrected chunk was re-indexed, so cached answers may be stale.
+    answer_cache.clear()
+    return record
 
 
 @app.get(

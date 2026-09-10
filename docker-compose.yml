@@ -11,6 +11,8 @@ services:
       VALIDATOR_SERVICE_URL: http://answer-validator-api:8004
       DOCUMENT_STORE_DIR: /data/documents
       REVIEW_STORE_PATH: /data/documents/reviews.jsonl
+      ASK_CACHE_ENABLED: ${ASK_CACHE_ENABLED:-true}
+      ASK_CACHE_MAX_ENTRIES: ${ASK_CACHE_MAX_ENTRIES:-500}
     volumes:
       - source-documents:/data/documents
     healthcheck:

@@ -33,6 +33,10 @@ class AskResponse(BaseModel):
     # Beside the answer, not inside it: the Strict Answer Schema allows only
     # document_id, page and section per citation.
     evidence_boxes: list[EvidenceBox] = Field(default_factory=list)
+    # True when the answer came from the answer cache instead of a new agent
+    # run; cache_match says whether the question matched exactly or reworded.
+    cache_hit: bool = False
+    cache_match: Optional[Literal["exact", "reworded"]] = None
 
 
 class IngestResponse(BaseModel):

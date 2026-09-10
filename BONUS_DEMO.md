@@ -50,20 +50,36 @@ the index, model downloads, and source PDFs across container restarts.
 6. Confirm the answer includes a document/page citation and the cited region is
    shown with a yellow fill and red border on the original PDF page.
 
-For an API-level check, the answer evidence now includes OCR coordinates:
+For an API-level check, call `/ask` and read `evidence_boxes`. The boxes sit
+beside the answer, not inside its citations: the Strict Answer Schema allows
+only `document_id`, `page` and `section` per citation, and
+`answer-validator-api` rejects any extra field.
+
+```bash
+curl --fail -X POST http://localhost:8000/ask \
+  -H 'Content-Type: application/json' \
+  -d '{"question": "QUESTION ABOUT THE UPLOADED REPORT", "document_id": "DOCUMENT_ID"}'
+```
 
 ```json
 {
-  "document_id": "sha256-...",
-  "page": 2,
-  "section": "Revenue",
-  "bbox": [106, 412, 1098, 678]
+  "answer_type": "direct",
+  "params": {"value": "..."},
+  "evidence": [
+    {"document_id": "sha256-...", "page": 2, "section": "Revenue"}
+  ],
+  "valid": true,
+  "evidence_boxes": [
+    {"document_id": "sha256-...", "page": 2, "section": "Revenue", "bbox": [106, 412, 1098, 678]}
+  ]
 }
 ```
 
-The coordinates originate in `doc-processor-api`, are retained in retrieval
-chunks, survive agent citation selection and validation, and are finally drawn
-by `ui-service`. Older documents already in a remote retrieval index remain
+The coordinates originate in `doc-processor-api` and are stored with each
+retrieval chunk. After the answer passes validation, `orchestrator-api` looks
+up the boxes of every cited page and section from retrieval-api
+(`/documents/{document_id}/chunks`), and `ui-service` draws them. A citation
+without a section takes every box on its page. Older documents already in a remote retrieval index remain
 searchable, but their original PDFs must also exist in this orchestrator's
 `source-documents` volume before the UI can render their pages.
 
