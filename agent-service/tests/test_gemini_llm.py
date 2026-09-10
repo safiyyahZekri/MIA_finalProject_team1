@@ -341,3 +341,33 @@ def test_cost_uses_gemini_rates_only_when_set(monkeypatch):
     monkeypatch.setattr(main.settings, "GEMINI_INPUT_USD_PER_MTOK", 0.3)
     monkeypatch.setattr(main.settings, "GEMINI_OUTPUT_USD_PER_MTOK", 2.5)
     assert main._usage_summary(trace)["cost_usd"] == 2.8
+
+
+def test_a_model_written_value_in_a_fixed_field_does_not_reject_the_formula():
+    """Gemini wrote \"shape\": \"percentage_change\" into ExtractionCalculated,
+    whose shape can only be \"calculated\"; the correct formula was declined as
+    'Could not extract numeric operands.'"""
+    reply = (
+        '{"shape": "percentage_change", "formula": "(25282320-22095416)/22095416*100", '
+        '"operand_count": 2, "evidence_indexes": [1]}'
+    )
+    llm, _ = _llm(_response(text=reply))
+
+    result = llm.extract("q", "numerical", EVIDENCE)
+
+    assert result.shape == "calculated"
+    assert result.formula == "(25282320-22095416)/22095416*100"
+    assert result.evidence_indexes == [1]
+
+
+def test_a_field_with_a_real_choice_is_still_validated():
+    llm, _ = _llm(_response(text='{"shape": "percentage_change", "value": "3,875"}'))
+
+    assert isinstance(llm.extract("q", "text", EVIDENCE), ExtractionInsufficient)
+
+
+def test_invalid_json_is_a_structured_output_error():
+    llm, _ = _llm(_response(text="not json"))
+
+    with pytest.raises(StructuredOutputError):
+        llm.classify("q")

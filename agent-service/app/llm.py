@@ -20,7 +20,7 @@ import logging
 import re
 import threading
 import time
-from typing import List, Literal, Optional
+from typing import List, Literal, Optional, get_args, get_origin
 
 import httpx
 from pydantic import BaseModel, Field, ValidationError
@@ -598,6 +598,16 @@ class ModelOutputError(RuntimeError):
     never answered must surface as an error, not score as a wrong answer."""
 
 
+def _fixed_fields(schema) -> List[str]:
+    """Fields whose type allows exactly one value, such as
+    ExtractionCalculated.shape: the model has nothing to choose there."""
+    return [
+        name
+        for name, field in schema.model_fields.items()
+        if get_origin(field.annotation) is Literal and len(get_args(field.annotation)) == 1
+    ]
+
+
 class _PromptedLLM:
     """Prompts and structured-output handling shared by the hosted providers
     that return schema-constrained JSON (AnthropicLLM, GeminiLLM).
@@ -622,8 +632,18 @@ class _PromptedLLM:
     def _structured(self, schema, prompt: str):
         text = self._create(prompt, schema)
         try:
-            return schema.model_validate_json(text)
-        except ValidationError as exc:
+            data = json.loads(text)
+            if isinstance(data, dict):
+                # A single-value field carries nothing from the model, so its
+                # value is dropped and the default applies. Gemini does not
+                # enforce the schema's const: it wrote "percentage_change" into
+                # ExtractionCalculated.shape and a correct formula was rejected.
+                # Fields with a real choice, like ExtractionChoice.shape, are
+                # still validated.
+                for name in _fixed_fields(schema):
+                    data.pop(name, None)
+            return schema.model_validate(data)
+        except ValueError as exc:  # invalid JSON, or pydantic's ValidationError
             raise StructuredOutputError(f"{schema.__name__}: {exc}") from exc
 
     def decompose(self, question: str) -> QueryPlan:
