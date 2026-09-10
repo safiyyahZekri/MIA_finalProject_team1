@@ -14,6 +14,8 @@ Graph shape (real conditional branches, not a fixed chain):
                                  build_insufficient -> END
 
 - `classify` branches retrieval strategy on text vs. table vs. numerical.
+- When enabled, `decompose` runs once after classification; its subquery
+  results merge into the same evidence-grading step.
 - `grade` branches on sufficient vs. insufficient evidence, with a bounded
   retry loop that reformulates the query on weak evidence.
 - `reason` branches on the extracted answer shape (direct / calculated /
@@ -22,12 +24,15 @@ Graph shape (real conditional branches, not a fixed chain):
 """
 from __future__ import annotations
 
+import logging
+import time
 from typing import Any, Dict, List, Literal, Optional, Tuple, TypedDict
 
 from langgraph.graph import StateGraph, START, END
 
 from app.calculator import CalculatorError, calculate
 from app.config import settings
+from app.decomposition import QueryPlan, merge_query_results
 from app.llm import (
     ExtractionCalculated,
     ExtractionDirect,
@@ -50,6 +55,8 @@ class AgentState(TypedDict, total=False):
     grade_reason: str
     answer: Dict[str, Any]
     trace: List[dict]
+    subqueries: List[str]
+    subquery_evidence: List[List[dict]]
 
 
 def _log(state: AgentState, step: str, **detail) -> None:
@@ -68,17 +75,38 @@ def _log_with_usage(state: AgentState, step: str, llm, **detail) -> None:
 
 
 def _dedup_and_rank(*hit_lists: List[dict]) -> List[dict]:
+    """Merge ranked hit lists into the top TOP_K_FINAL unique passages.
+
+    By default hits are ordered by raw score. Dense, lexical and table
+    searches score on different scales, so a passage ranked high by one can
+    lose its place to lower-ranked hits of another: in A013 the gold
+    passage was 4th in BM25 and dropped from the merged five. With
+    RANK_FUSION_MERGE, hits are ordered by reciprocal rank fusion over the
+    lists instead, with raw score breaking ties.
+    """
     best: Dict[tuple, dict] = {}
+    fusion: Dict[tuple, float] = {}
     for hits in hit_lists:
-        for h in hits:
+        seen = set()
+        for rank, h in enumerate(hits, start=1):
             key = (h.get("document_id"), h.get("page"), h.get("section"))
             if key not in best or h.get("score", 0) > best[key].get("score", 0):
                 best[key] = h
-    ranked = sorted(best.values(), key=lambda h: h.get("score", 0), reverse=True)
+            if key not in seen:
+                seen.add(key)
+                fusion[key] = fusion.get(key, 0.0) + 1.0 / (60 + rank)
+    if settings.RANK_FUSION_MERGE:
+        order = sorted(best, key=lambda k: (-fusion[k], -best[k].get("score", 0)))
+        ranked = [best[k] for k in order]
+    else:
+        ranked = sorted(best.values(), key=lambda h: h.get("score", 0), reverse=True)
     return ranked[: settings.TOP_K_FINAL]
 
 
 def _top_evidence(hits: List[dict], n: int) -> List[dict]:
+    # The Strict Answer Schema allows exactly these fields per citation, and
+    # answer-validator-api rejects any other. Coordinates for highlighting
+    # belong in a separate field next to the answer, not in the citation.
     return [
         {"document_id": h["document_id"], "page": h["page"], "section": h.get("section")}
         for h in hits[:n]
@@ -125,21 +153,44 @@ def build_graph():
         _log_with_usage(state, "classify", llm, question_type=result.question_type, query=result.search_query)
         return state
 
+    async def decompose_node(state: AgentState) -> AgentState:
+        state["subqueries"] = []
+        state["subquery_evidence"] = []
+        started = time.perf_counter()
+        if hasattr(llm, "last_usage"):
+            llm.last_usage = {}
+        try:
+            plan = QueryPlan.model_validate(llm.decompose(state["question"]))
+            if 2 <= len(plan.subqueries) <= settings.TOP_K_FINAL:
+                state["subqueries"] = plan.subqueries
+            status = "split" if state["subqueries"] else "single_query"
+            _log_with_usage(state, "decompose", llm, status=status,
+                            subqueries=state["subqueries"],
+                            latency_ms=(time.perf_counter() - started) * 1000)
+        except Exception as exc:
+            # Planning is optional. Fall back to the ordinary query visibly;
+            # failures in actual retrieval, grading and extraction still raise.
+            logging.getLogger("agent-service").warning(
+                "Query decomposition failed (%s); using the original query", type(exc).__name__
+            )
+            _log_with_usage(state, "decompose", llm, status="fallback",
+                            error_type=type(exc).__name__, subqueries=[],
+                            latency_ms=(time.perf_counter() - started) * 1000)
+        return state
+
+    async def retrieve_query(query: str, qtype: str, doc_id: Optional[str]) -> tuple:
+        if qtype == "numerical":
+            return await search_documents(query, document_id=doc_id), await search_tables(query, document_id=doc_id)
+        if qtype == "table":
+            return await search_tables(query, document_id=doc_id), await search_documents(query, document_id=doc_id)
+        return await search_documents(query, document_id=doc_id), await search_bm25(query, document_id=doc_id)
+
     async def retrieve_node(state: AgentState) -> AgentState:
         query = state["current_query"]
         doc_id = state.get("document_id")
         qtype = state["question_type"]
 
-        if qtype == "numerical":
-            # numbers often live in tables, but may also be narrated in text
-            vec_hits, table_hits = await search_documents(query, document_id=doc_id), await search_tables(query, document_id=doc_id)
-            combined = _dedup_and_rank(vec_hits, table_hits)
-        elif qtype == "table":
-            table_hits, vec_hits = await search_tables(query, document_id=doc_id), await search_documents(query, document_id=doc_id)
-            combined = _dedup_and_rank(table_hits, vec_hits)
-        else:  # "text" -> hybrid dense + lexical, the required non-vector path
-            vec_hits, bm25_hits = await search_documents(query, document_id=doc_id), await search_bm25(query, document_id=doc_id)
-            combined = _dedup_and_rank(vec_hits, bm25_hits)
+        combined = _dedup_and_rank(*(await retrieve_query(query, qtype, doc_id)))
 
         # Direct metadata lookup (non-vector path #2): when the caller scoped
         # the question to a specific document, pull everything indexed for
@@ -149,12 +200,51 @@ def build_graph():
             filter_hits = await filter_documents({"document_id": doc_id})
             combined = _dedup_and_rank(combined, filter_hits)
 
+        subqueries = state.get("subqueries", [])
+        reused = bool(state.get("subquery_evidence"))
+        if subqueries:
+            if not reused:
+                rankings = []
+                for subquery in subqueries:
+                    started = time.perf_counter()
+                    lists = await retrieve_query(subquery, qtype, doc_id)
+                    hits = sorted((h for group in lists for h in group),
+                                  key=lambda h: h.get("score", 0), reverse=True)
+                    rankings.append(hits)
+                    _log(state, "retrieve_subquery", query=subquery,
+                         latency_ms=(time.perf_counter() - started) * 1000,
+                         candidate_count=len(hits),
+                         document_ids=list(dict.fromkeys(h.get("document_id") for h in hits)))
+                state["subquery_evidence"] = rankings
+            # Within this request only: retain operand evidence through retries
+            # while the existing reformulator searches for additional context.
+            combined = merge_query_results(
+                [*state["subquery_evidence"], combined], settings.TOP_K_FINAL
+            )
+
         state["evidence"] = combined
         _log(
             state, "retrieve", question_type=qtype, query=query, n_hits=len(combined),
+            subqueries=subqueries, reused_subquery_evidence=reused,
             # What was retrieved, in rank order, so a citation can be checked
             # against the evidence the model actually saw.
             hits=[f"{h.get('document_id')}:p{h.get('page')}" for h in combined],
+            # Preserve identity for evaluation without logging passage text.
+            # Legacy hits above remain available to existing trace consumers.
+            retrieval_hits=[
+                {
+                    **{key: h.get(key) for key in (
+                        "chunk_id", "document_id", "source_doc_uid", "filename",
+                        "source_filename", "page", "score",
+                    ) if h.get(key) is not None},
+                    "metadata": {
+                        key: h["metadata"][key]
+                        for key in ("source_doc_uid", "original_filename")
+                        if isinstance(h.get("metadata"), dict) and h["metadata"].get(key) is not None
+                    },
+                }
+                for h in combined
+            ],
         )
         return state
 
@@ -278,7 +368,12 @@ def build_graph():
     graph.add_node("build_insufficient", build_insufficient_node)
 
     graph.add_edge(START, "classify")
-    graph.add_edge("classify", "retrieve")
+    if settings.QUERY_DECOMPOSITION:
+        graph.add_node("decompose", decompose_node)
+        graph.add_edge("classify", "decompose")
+        graph.add_edge("decompose", "retrieve")
+    else:
+        graph.add_edge("classify", "retrieve")
     graph.add_edge("retrieve", "grade")
     graph.add_conditional_edges(
         "grade",

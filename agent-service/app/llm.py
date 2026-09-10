@@ -6,6 +6,8 @@ Two interchangeable providers implement the same interface:
                     Default, so the service runs immediately with no API key.
   - AnthropicLLM  : Claude (claude-opus-5 by default) through the official
                     Anthropic SDK, via structured outputs.
+  - GeminiLLM     : Gemini (gemini-2.5-flash by default) through Google's
+                    official google-genai SDK, with the same prompts.
 
 Only classification, query reformulation, evidence grading, and *proposing*
 extraction candidates go through the LLM. The actual arithmetic always goes
@@ -22,6 +24,7 @@ import httpx
 from pydantic import BaseModel, Field, ValidationError
 
 from app.config import settings
+from app.decomposition import QueryPlan, decomposition_prompt
 
 logger = logging.getLogger("agent-service.llm")
 
@@ -152,6 +155,10 @@ class ExtractionChoice(BaseModel):
 # ------------------------------------------------------------- mock impl --
 class MockLLM:
     """Deterministic, offline heuristic stand-in for a real LLM."""
+
+    def decompose(self, question: str) -> QueryPlan:
+        # Mock mode makes no claims about semantic query planning.
+        return QueryPlan()
 
     def classify(self, question: str) -> Classification:
         lowered = question.lower()
@@ -301,6 +308,9 @@ class OllamaLLM:
                     "Reply with ONLY the JSON object and nothing else."
                 )
         raise OllamaError(f"Model returned non-JSON output twice: {last_err}")
+
+    def decompose(self, question: str) -> QueryPlan:
+        return QueryPlan.model_validate(self._generate(decomposition_prompt(question)))
 
     def classify(self, question: str) -> Classification:
         prompt = (
@@ -478,6 +488,9 @@ class GroqLLM:
                 ]
         raise GroqError(f"Model returned non-JSON output twice: {last_err}")
 
+    def decompose(self, question: str) -> QueryPlan:
+        return QueryPlan.model_validate(self._generate(decomposition_prompt(question)))
+
     def classify(self, question: str) -> Classification:
         prompt = (
             "Classify this financial-document question for retrieval routing.\n"
@@ -583,7 +596,183 @@ class ModelOutputError(RuntimeError):
     never answered must surface as an error, not score as a wrong answer."""
 
 
-class AnthropicLLM:
+class _PromptedLLM:
+    """Prompts and structured-output handling shared by the hosted providers
+    that return schema-constrained JSON (AnthropicLLM, GeminiLLM).
+
+    A subclass supplies `_create(prompt, schema=None) -> str`: the complete
+    answer text, or an exception. API failures propagate, and refused,
+    blocked or truncated output raises ModelOutputError, so the caller records
+    an error. Only a complete response that does not fit the schema becomes
+    an insufficient-evidence extraction.
+
+    Enhancements from eval-service/FAILURE_ANALYSIS_E2E.md are switched by
+    settings (ANSWER_FORMAT_FIXES, GRADE_COMPANY_CONTEXT,
+    GRADE_REQUIRE_NAMED_TABLE), so an experiment can turn on exactly one.
+    With all of them off, the prompts are the ones run `full-100-v1` measured.
+    """
+
+    last_usage: dict
+
+    def _create(self, prompt: str, schema=None) -> str:
+        raise NotImplementedError
+
+    def _structured(self, schema, prompt: str):
+        text = self._create(prompt, schema)
+        try:
+            return schema.model_validate_json(text)
+        except ValidationError as exc:
+            raise StructuredOutputError(f"{schema.__name__}: {exc}") from exc
+
+    def decompose(self, question: str) -> QueryPlan:
+        return self._structured(QueryPlan, decomposition_prompt(question))
+
+    def classify(self, question: str) -> Classification:
+        return self._structured(
+            Classification,
+            "Classify this financial-document question for retrieval routing.\n"
+            "question_type must be exactly one of: numerical, table, text.\n"
+            "- numerical: requires arithmetic (comparison, % change, sum, ratio, etc.)\n"
+            "- table: answer likely lives in a financial table/line item, no math needed\n"
+            "- text: narrative/prose answer\n"
+            "search_query: a focused retrieval query derived from the question.\n\n"
+            f"Question: {question}",
+        )
+
+    def reformulate(self, question: str, previous_query: str, attempt: int) -> str:
+        query = self._create(
+            "The previous retrieval query returned insufficient evidence.\n"
+            f"Original question: {question}\n"
+            f"Previous query: {previous_query}\n"
+            "Propose ONE broader or differently-phrased retrieval query "
+            "(no explanation, just the query text)."
+        ).strip()
+        return query or previous_query
+
+    def grade(self, question: str, evidence: List[dict]) -> EvidenceGrade:
+        snippets = "\n---\n".join(
+            f"[{e.get('document_id')} p{e.get('page')} score={e.get('score')}]\n{e.get('text','')}"
+            for e in evidence
+        ) or "(no evidence retrieved)"
+        rules: List[str] = []
+        if settings.ANSWER_FORMAT_FIXES:
+            # A013: the grader refused a passage holding the answer because the
+            # question also asked for a page, which the citation supplies.
+            rules.append(
+                "Page numbers come from the citations, so a question asking which page "
+                "supports the answer does not need a page number in the evidence.\n"
+            )
+        if settings.GRADE_REQUIRE_ENTITY_MATCH and settings.GRADE_COMPANY_CONTEXT:
+            # A035, A001: correct passages were refused only because their page
+            # never names the company. Evidence tied to a different company is
+            # still refused, which is what stopped A017.
+            rules.append(
+                "If the question names a company, never accept evidence that belongs to a "
+                "different company: when any passage shows the figures are another "
+                "company's (its name, or segments, products or a fiscal year-end that "
+                "belong to another company), sufficient=false. A passage that names no "
+                "company may be accepted when it fits the question exactly and nothing in "
+                "the evidence points to a different company; state in the reason what ties "
+                "it to the named company, or that nothing contradicts it.\n"
+            )
+        elif settings.GRADE_REQUIRE_ENTITY_MATCH:
+            # Many excerpts never name their company, so figures that fit the
+            # question can come from another company's table entirely.
+            rules.append(
+                "If the question names a company, the evidence must be identifiably that "
+                "company's: its name, or something unambiguous about it, appears in the "
+                "evidence. Figures that fit the question but cannot be tied to the named "
+                "company are not sufficient.\n"
+            )
+        if settings.GRADE_REQUIRE_NAMED_TABLE:
+            # A068: a three-year table was accepted for a question about the
+            # five-year "financial highlights" table, at confidence 0.58.
+            rules.append(
+                "If the question names a specific table, statement or section (for example "
+                "'financial highlights'), the evidence must come from that table or section; "
+                "a different table with similar figures or fewer periods is not sufficient.\n"
+            )
+        return self._structured(
+            EvidenceGrade,
+            "Judge whether the evidence below is sufficient to confidently and "
+            "faithfully answer the question. Be strict: if the exact fact/number "
+            "needed isn't present, sufficient=false.\n"
+            f"{''.join(rules)}\n"
+            f"Question: {question}\n\nEvidence:\n{snippets}",
+        )
+
+    def extract(self, question: str, question_type: str, evidence: List[dict]):
+        # Numbered, so extraction can name the passages its answer came from
+        # and the answer can cite exactly those.
+        snippets = "\n---\n".join(
+            f"[{i}] {e.get('document_id')} p{e.get('page')}\n{e.get('text','')}"
+            for i, e in enumerate(evidence, start=1)
+        )
+        if question_type == "numerical":
+            calculation_rules = ""
+            if settings.ANSWER_FORMAT_FIXES:
+                # A014 used rounded text figures ($84.7M) over the exact table
+                # (84,684), and A007 counted three yearly changes in a
+                # two-year period.
+                calculation_rules = (
+                    "When a figure appears both in a table and rounded in the text, take it "
+                    "from the table.\n"
+                    "A change over a period from one year to a later year covers only the "
+                    "year-on-year changes inside that period: from 2017 to 2019 means "
+                    "2017 to 2018 and 2018 to 2019.\n"
+                )
+            try:
+                return self._structured(
+                    ExtractionCalculated,
+                    "Extract the numeric operands from the evidence needed to answer the "
+                    "question and express the calculation as a pure-arithmetic formula "
+                    "using ONLY the literal numbers found in the evidence "
+                    "(e.g. '(3875-3410)/3410*100'). Do not compute the result yourself.\n"
+                    f"{calculation_rules}"
+                    "Set evidence_indexes to the numbers of the passages the operands were "
+                    "taken from.\n\n"
+                    f"Question: {question}\n\nEvidence:\n{snippets}",
+                )
+            except StructuredOutputError:
+                return ExtractionInsufficient(reason="Could not extract numeric operands.")
+
+        format_rules = ""
+        if settings.ANSWER_FORMAT_FIXES:
+            # A086 dropped "million" from "$12.2 million" under the exact-span
+            # rule, and A013 added the page marker "p1" as an answer value.
+            format_rules = (
+                "Keep a scale word or percent sign that follows the number in the evidence "
+                "(\"$12.2 million\", \"3.1%\"); it is part of the span. Do not put page "
+                "numbers in the answer; the citations carry them.\n"
+            )
+        # Let the model choose direct vs multi_span vs insufficient.
+        try:
+            choice = self._structured(
+                ExtractionChoice,
+                "Answer the question using ONLY the evidence below. Set shape to "
+                "exactly one of:\n"
+                "- direct: a single fact/value -- fill `value`\n"
+                "- multi_span: two or more distinct values/items -- fill `values`\n"
+                "- insufficient: the evidence doesn't contain the answer -- fill `reason`\n"
+                "Leave the fields belonging to the other shapes unset.\n"
+                # Opus 5 writes fuller answers by default -- "2019: $2,657
+                # thousand" for a cell reading "2,657" -- which exact match
+                # scores as wrong even when the fact is right.
+                "Copy each value exactly as it is written in the evidence, as the shortest "
+                "span that answers the question. Do not add labels, years, units, currency "
+                "symbols or explanation that are not part of that span.\n"
+                f"{format_rules}"
+                "Set evidence_indexes to the numbers of the passages the answer was taken "
+                "from.\n\n"
+                f"Question: {question}\n\nEvidence:\n{snippets}",
+            )
+        except StructuredOutputError as exc:
+            logger.warning("%s extract() returned no usable structure: %s", type(self).__name__, exc)
+            return ExtractionInsufficient(reason=f"Model response did not match the schema: {exc}")
+        return choice.as_extraction()
+
+
+class AnthropicLLM(_PromptedLLM):
     """Claude through the official Anthropic SDK, with structured outputs.
 
     Built for Claude Opus 5, whose request surface differs from earlier models
@@ -671,110 +860,88 @@ class AnthropicLLM:
                 text.append(block.text)
         return "".join(text)
 
-    def _structured(self, schema, prompt: str):
-        text = self._create(prompt, schema)
-        try:
-            return schema.model_validate_json(text)
-        except ValidationError as exc:
-            raise StructuredOutputError(f"{schema.__name__}: {exc}") from exc
 
-    def classify(self, question: str) -> Classification:
-        return self._structured(
-            Classification,
-            "Classify this financial-document question for retrieval routing.\n"
-            "question_type must be exactly one of: numerical, table, text.\n"
-            "- numerical: requires arithmetic (comparison, % change, sum, ratio, etc.)\n"
-            "- table: answer likely lives in a financial table/line item, no math needed\n"
-            "- text: narrative/prose answer\n"
-            "search_query: a focused retrieval query derived from the question.\n\n"
-            f"Question: {question}",
+def _enum_name(value) -> Optional[str]:
+    return None if value is None else getattr(value, "name", str(value))
+
+
+class GeminiLLM(_PromptedLLM):
+    """Gemini through Google's official google-genai SDK, with JSON-schema
+    structured output. Same prompts and failure handling as AnthropicLLM.
+
+      * Structured output sends `response_mime_type="application/json"` with
+        the pydantic model's JSON schema as `response_json_schema`.
+      * Rate limits and transient server errors are retried inside the SDK with
+        exponential backoff (GEMINI_MAX_ATTEMPTS tries in total), so a free
+        tier's per-minute limit becomes a wait. A limit that outlasts the
+        retries -- a daily quota -- propagates and is recorded as an error.
+      * A blocked prompt, or a candidate that stopped for any reason other than
+        STOP, raises ModelOutputError: output cut off at max_output_tokens
+        (which thinking also consumes) or withheld for safety is not an answer.
+      * Thinking tokens are billed as output, so they count as completion tokens.
+    """
+
+    RETRY_STATUS_CODES = (429, 500, 502, 503, 504)
+
+    def __init__(self) -> None:
+        from google import genai  # local import by design: the mock path needs no SDK
+
+        self._client = genai.Client(
+            api_key=settings.GEMINI_API_KEY,
+            http_options={
+                "retry_options": {
+                    "attempts": settings.GEMINI_MAX_ATTEMPTS,
+                    "initial_delay": 2.0,
+                    "max_delay": 60.0,
+                    "http_status_codes": list(self.RETRY_STATUS_CODES),
+                }
+            },
+        )
+        self.last_usage: dict = {}
+
+    def _create(self, prompt: str, schema=None) -> str:
+        """One request; returns the answer text once it is known to be complete."""
+        config: dict = {"max_output_tokens": settings.GEMINI_MAX_OUTPUT_TOKENS}
+        if settings.GEMINI_TEMPERATURE is not None:
+            config["temperature"] = settings.GEMINI_TEMPERATURE
+        if schema is not None:
+            config["response_mime_type"] = "application/json"
+            config["response_json_schema"] = schema.model_json_schema()
+
+        self.last_usage = {}
+        response = self._client.models.generate_content(
+            model=settings.GEMINI_MODEL, contents=prompt, config=config
         )
 
-    def reformulate(self, question: str, previous_query: str, attempt: int) -> str:
-        query = self._create(
-            "The previous retrieval query returned insufficient evidence.\n"
-            f"Original question: {question}\n"
-            f"Previous query: {previous_query}\n"
-            "Propose ONE broader or differently-phrased retrieval query "
-            "(no explanation, just the query text)."
-        ).strip()
-        return query or previous_query
-
-    def grade(self, question: str, evidence: List[dict]) -> EvidenceGrade:
-        snippets = "\n---\n".join(
-            f"[{e.get('document_id')} p{e.get('page')} score={e.get('score')}]\n{e.get('text','')}"
-            for e in evidence
-        ) or "(no evidence retrieved)"
-        entity_rule = ""
-        if settings.GRADE_REQUIRE_ENTITY_MATCH:
-            # Many excerpts never name their company, so figures that fit the
-            # question can come from another company's table entirely.
-            entity_rule = (
-                "If the question names a company, the evidence must be identifiably that "
-                "company's: its name, or something unambiguous about it, appears in the "
-                "evidence. Figures that fit the question but cannot be tied to the named "
-                "company are not sufficient.\n"
+        usage = getattr(response, "usage_metadata", None)
+        if usage is not None:
+            self.last_usage = {
+                "prompt_tokens": usage.prompt_token_count or 0,
+                "completion_tokens": (usage.candidates_token_count or 0)
+                + (usage.thoughts_token_count or 0),
+            }
+        feedback = getattr(response, "prompt_feedback", None)
+        if feedback is not None and getattr(feedback, "block_reason", None):
+            raise ModelOutputError(f"prompt blocked (block reason: {_enum_name(feedback.block_reason)})")
+        candidates = response.candidates or []
+        if not candidates:
+            raise ModelOutputError("model returned no candidates")
+        finish = _enum_name(candidates[0].finish_reason)
+        if finish == "MAX_TOKENS":
+            raise ModelOutputError(
+                f"output truncated at max_output_tokens={settings.GEMINI_MAX_OUTPUT_TOKENS}; "
+                "thinking counts toward it, so raise GEMINI_MAX_OUTPUT_TOKENS"
             )
-        return self._structured(
-            EvidenceGrade,
-            "Judge whether the evidence below is sufficient to confidently and "
-            "faithfully answer the question. Be strict: if the exact fact/number "
-            "needed isn't present, sufficient=false.\n"
-            f"{entity_rule}\n"
-            f"Question: {question}\n\nEvidence:\n{snippets}",
-        )
-
-    def extract(self, question: str, question_type: str, evidence: List[dict]):
-        # Numbered, so extraction can name the passages its answer came from
-        # and the answer can cite exactly those.
-        snippets = "\n---\n".join(
-            f"[{i}] {e.get('document_id')} p{e.get('page')}\n{e.get('text','')}"
-            for i, e in enumerate(evidence, start=1)
-        )
-        if question_type == "numerical":
-            try:
-                return self._structured(
-                    ExtractionCalculated,
-                    "Extract the numeric operands from the evidence needed to answer the "
-                    "question and express the calculation as a pure-arithmetic formula "
-                    "using ONLY the literal numbers found in the evidence "
-                    "(e.g. '(3875-3410)/3410*100'). Do not compute the result yourself.\n"
-                    "Set evidence_indexes to the numbers of the passages the operands were "
-                    "taken from.\n\n"
-                    f"Question: {question}\n\nEvidence:\n{snippets}",
-                )
-            except StructuredOutputError:
-                return ExtractionInsufficient(reason="Could not extract numeric operands.")
-
-        # Let the model choose direct vs multi_span vs insufficient.
-        try:
-            choice = self._structured(
-                ExtractionChoice,
-                "Answer the question using ONLY the evidence below. Set shape to "
-                "exactly one of:\n"
-                "- direct: a single fact/value -- fill `value`\n"
-                "- multi_span: two or more distinct values/items -- fill `values`\n"
-                "- insufficient: the evidence doesn't contain the answer -- fill `reason`\n"
-                "Leave the fields belonging to the other shapes unset.\n"
-                # Opus 5 writes fuller answers by default -- "2019: $2,657
-                # thousand" for a cell reading "2,657" -- which exact match
-                # scores as wrong even when the fact is right.
-                "Copy each value exactly as it is written in the evidence, as the shortest "
-                "span that answers the question. Do not add labels, years, units, currency "
-                "symbols or explanation that are not part of that span.\n"
-                "Set evidence_indexes to the numbers of the passages the answer was taken "
-                "from.\n\n"
-                f"Question: {question}\n\nEvidence:\n{snippets}",
-            )
-        except StructuredOutputError as exc:
-            logger.warning("Anthropic extract() returned no usable structure: %s", exc)
-            return ExtractionInsufficient(reason=f"Model response did not match the schema: {exc}")
-        return choice.as_extraction()
+        if finish not in ("STOP", None):
+            raise ModelOutputError(f"model stopped without a complete answer (finish reason: {finish})")
+        return response.text or ""
 
 
 def get_llm():
     if settings.LLM_PROVIDER == "anthropic":
         return AnthropicLLM()
+    if settings.LLM_PROVIDER == "gemini":
+        return GeminiLLM()
     if settings.LLM_PROVIDER == "groq":
         return GroqLLM()
     if settings.LLM_PROVIDER == "ollama":

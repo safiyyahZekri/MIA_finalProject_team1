@@ -41,7 +41,12 @@ async def health():
     body["config"] = {
         "top_k_final": settings.TOP_K_FINAL,
         "max_retries": settings.MAX_RETRIES,
+        "query_decomposition": settings.QUERY_DECOMPOSITION,
         "grade_require_entity_match": settings.GRADE_REQUIRE_ENTITY_MATCH,
+        "answer_format_fixes": settings.ANSWER_FORMAT_FIXES,
+        "grade_company_context": settings.GRADE_COMPANY_CONTEXT,
+        "grade_require_named_table": settings.GRADE_REQUIRE_NAMED_TABLE,
+        "rank_fusion_merge": settings.RANK_FUSION_MERGE,
     }
     if settings.LLM_PROVIDER == "anthropic":
         body["config"].update(
@@ -50,6 +55,15 @@ async def health():
             max_tokens=settings.ANTHROPIC_MAX_TOKENS,
             fallbacks=settings.ANTHROPIC_FALLBACKS or None,
         )
+    if settings.LLM_PROVIDER == "gemini":
+        body["config"].update(
+            model=settings.GEMINI_MODEL,
+            max_output_tokens=settings.GEMINI_MAX_OUTPUT_TOKENS,
+            temperature=settings.GEMINI_TEMPERATURE,
+        )
+        if not settings.GEMINI_API_KEY:
+            body["status"] = "degraded"
+            body["hint"] = "GEMINI_API_KEY is not set in .env -- create a key in Google AI Studio"
     if settings.LLM_PROVIDER == "ollama":
         from app.llm import OllamaLLM  # local import: avoid httpx.Client at module load
 
@@ -110,10 +124,13 @@ def _usage_summary(trace: list) -> dict:
     input_tokens = sum(usage.get("prompt_tokens") or 0 for usage in calls)
     output_tokens = sum(usage.get("completion_tokens") or 0 for usage in calls)
     cost_usd = None
-    if settings.LLM_PROVIDER == "anthropic":
+    rates = {
+        "anthropic": (settings.ANTHROPIC_INPUT_USD_PER_MTOK, settings.ANTHROPIC_OUTPUT_USD_PER_MTOK),
+        "gemini": (settings.GEMINI_INPUT_USD_PER_MTOK, settings.GEMINI_OUTPUT_USD_PER_MTOK),
+    }.get(settings.LLM_PROVIDER)
+    if rates and any(rates):
         cost_usd = round(
-            input_tokens / 1_000_000 * settings.ANTHROPIC_INPUT_USD_PER_MTOK
-            + output_tokens / 1_000_000 * settings.ANTHROPIC_OUTPUT_USD_PER_MTOK,
+            input_tokens / 1_000_000 * rates[0] + output_tokens / 1_000_000 * rates[1],
             6,
         )
     return {

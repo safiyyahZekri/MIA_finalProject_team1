@@ -42,10 +42,10 @@ This was confirmed end-to-end against the real `feature/agent-service`
 branch (100 practice questions, 0 errors, 100% schema validity), so
 `answer_key="answer"` is the default here — override it only if a future
 system response shape doesn't nest the answer under `"answer"`.
-`trace` is confirmed to be a list (the agent's internal step history) but
-its per-item shape isn't part of the confirmed contract, so it's still
-treated as opaque: read verbatim if present, stored alongside the result,
-never required and never validated. It is also never forwarded to
+`trace` is stored verbatim. Known `retrieve` steps are additionally scored
+from ranked `retrieval_hits` objects or legacy `hits` strings; missing or
+unrecognised retrieval traces are reported as unavailable, never inferred
+from answer citations. The trace is never forwarded to
 answer-validator-api, since that endpoint's schema forbids unknown keys —
 only the bare `{answer_type, evidence, params}` object is sent there.
 `retries_used`, when present, is captured as a system-performance metric
@@ -67,8 +67,9 @@ For each question the harness:
   4. Scores EM / F1 / numerical accuracy against the gold answer (with
      scale normalization), or, for `unanswerable` gold questions, whether
      the system correctly abstained.
-  5. If gold evidence document ids are available, scores Recall@K /
-     Precision@K / Hit Rate / MRR against the predicted evidence.
+  5. Scores final citations separately from initial/final retrieval attempts
+     and retry coverage. Legacy `retrieval` fields remain citation-based;
+     use `citation` and `agent_retrieval` in new consumers.
   6. Logs question, response, and scoring outcome as trace steps, then
      closes the trace.
   7. Aggregates everything, including a short list of failed examples with
@@ -87,6 +88,7 @@ import httpx
 
 from . import metrics as m
 from . import tracing
+from .evidence_scoring import METRIC_DEFINITIONS, score_evidence, summarize_evidence
 from .retrieval_benchmark import load_identity_aliases
 from .semantic_cache import SemanticCache
 
@@ -230,6 +232,7 @@ class BenchmarkConfig:
     # default so existing callers/tests see unchanged behavior.
     use_cache: bool = False
     cache_similarity_threshold: float = 0.85
+    identity_aliases: Dict[str, str] = field(default_factory=load_identity_aliases)
 
 
 @dataclass
@@ -251,6 +254,8 @@ class QuestionResult:
     error: Optional[str] = None
     extra_perf: dict = field(default_factory=dict)
     cache_hit: Optional[bool] = None
+    citation: Optional[dict] = None
+    agent_retrieval: Optional[dict] = None
 
     @property
     def is_failure(self) -> bool:
@@ -276,7 +281,7 @@ def run_benchmark(config: BenchmarkConfig) -> dict:
             question_text = q.get(config.question_field, "")
             gold = q.get(config.gold_field)
             gold_scale = q.get(config.scale_field) or ""
-            relevant_docs = _extract_relevant_doc_ids(q)
+            relevant_docs = _extract_relevant_doc_ids(q, config.identity_aliases)
             scoping_doc_id = (
                 _extract_scoping_doc_id(q) if config.scope_to_gold_document else None
             )
@@ -381,7 +386,7 @@ def run_benchmark(config: BenchmarkConfig) -> dict:
                 num_acc = m.numerical_accuracy(predicted_value, gold, gold_scale=gold_scale)
 
             if answer_obj is not None and relevant_docs:
-                retrieved_ids = _extract_retrieved_doc_ids(answer_obj)
+                retrieved_ids = _extract_retrieved_doc_ids(answer_obj, config.identity_aliases)
                 k = config.retrieval_k
                 retrieval_scores = {
                     "recall_at_k": m.recall_at_k(retrieved_ids, relevant_docs, k),
@@ -389,6 +394,11 @@ def run_benchmark(config: BenchmarkConfig) -> dict:
                     "hit_rate": m.hit_rate(retrieved_ids, relevant_docs, k),
                     "reciprocal_rank": m.reciprocal_rank(retrieved_ids, relevant_docs),
                 }
+
+            evidence_scores = score_evidence(
+                answer_obj, system_trace, set(relevant_docs), config.retrieval_k,
+                config.identity_aliases,
+            )
 
             tracing.log_step(
                 trace_id,
@@ -399,6 +409,7 @@ def run_benchmark(config: BenchmarkConfig) -> dict:
                     "f1": f1,
                     "numerical_accuracy": num_acc,
                     "retrieval": retrieval_scores,
+                    **evidence_scores,
                 },
             )
             tracing.end_trace(trace_id, output={"exact_match": em, "schema_valid": schema_valid})
@@ -422,6 +433,7 @@ def run_benchmark(config: BenchmarkConfig) -> dict:
                     error=error,
                     extra_perf=perf_extra,
                     cache_hit=cache_hit if cache is not None else None,
+                    **evidence_scores,
                 )
             )
 
@@ -430,6 +442,7 @@ def run_benchmark(config: BenchmarkConfig) -> dict:
         "run_id": run_id,
         "system_url": config.system_url,
         "num_questions": len(config.questions),
+        "metric_definitions": METRIC_DEFINITIONS,
         "summary": summary,
         "results": [r.__dict__ for r in results],
     }
@@ -467,6 +480,7 @@ def _summarize(results: List[QuestionResult]) -> dict:
     ]
 
     return {
+        **summarize_evidence([r.__dict__ for r in results]),
         "num_questions": n,
         "num_errors": n_errors,
         "error_rate": n_errors / n if n else None,

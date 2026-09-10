@@ -48,6 +48,21 @@ def test_two_chunks_of_the_same_page_are_cited_once():
     assert len(citations) == 1
 
 
+def test_citation_has_only_the_strict_schema_fields():
+    """answer-validator-api rejects any citation key beyond document_id, page
+    and section, so a hit's bounding box must not reach the citation."""
+    hit = {
+        "document_id": "report",
+        "page": 4,
+        "section": "Revenue",
+        "bbox": [10, 20, 300, 120],
+    }
+
+    citations, _ = _citations([hit], [1], fallback_n=1)
+
+    assert citations == [{"document_id": "report", "page": 4, "section": "Revenue"}]
+
+
 class NamesSecondPassage:
     """An LLM whose extraction cites the second retrieved passage, not the first."""
 
@@ -80,3 +95,31 @@ async def test_graph_cites_what_extraction_named_not_the_top_hit(monkeypatch):
     ]
     reason = next(step for step in final["trace"] if step["step"] == "reason")
     assert reason["cited_by_model"] is True
+    retrieval = next(step for step in final["trace"] if step["step"] == "retrieve")
+    assert [hit["document_id"] for hit in retrieval["retrieval_hits"]] == [
+        hit["document_id"] for hit in final["evidence"]
+    ]
+    assert all("text" not in hit and "content" not in hit for hit in retrieval["retrieval_hits"])
+
+
+@pytest.mark.asyncio
+async def test_retrieval_trace_preserves_source_identity_without_full_text(monkeypatch):
+    monkeypatch.setattr(graph, "get_llm", lambda: NamesSecondPassage())
+    hit = {"document_id": "sha256-new", "source_doc_uid": "uid-new", "filename": "uid-new.pdf",
+           "page": 1, "score": 0.9, "text": "private passage",
+           "metadata": {"source_doc_uid": "uid-new", "original_filename": "uid-new.pdf",
+                        "full_document": "must not be traced"}}
+
+    async def search(*args, **kwargs):
+        return [hit]
+
+    monkeypatch.setattr(graph, "search_documents", search)
+    monkeypatch.setattr(graph, "search_bm25", search)
+    final = await graph.build_graph().ainvoke({"question": "Revenue?", "trace": []})
+    step = next(s for s in final["trace"] if s["step"] == "retrieve")
+    assert step["hits"] == ["sha256-new:p1"]
+    assert step["retrieval_hits"] == [{
+        "document_id": "sha256-new", "source_doc_uid": "uid-new", "filename": "uid-new.pdf",
+        "page": 1, "score": 0.9,
+        "metadata": {"source_doc_uid": "uid-new", "original_filename": "uid-new.pdf"},
+    }]

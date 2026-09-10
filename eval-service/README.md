@@ -84,6 +84,47 @@ local-fallback path.
 
 ## Benchmark endpoints
 
+### Read answer citations and retrieval separately
+
+New answer benchmark reports include `citation` and `agent_retrieval` in
+each result and the summary. `agent_retrieval.first_attempt` and
+`agent_retrieval.final_attempt` score the ranked hits actually passed to
+grading. Retry-union coverage is reported as `any_attempt_hit_rate` and
+`any_attempt_recall`; it is not a single-search Recall@K. A declined answer
+can have zero citation coverage and successful retrieval.
+
+The old per-result `retrieval` and summary `retrieval_*` fields remain
+**deprecated citation metrics** for compatibility. New consumers should use
+the explicit fields and `metric_definitions`. New Precision@K uses K as its
+denominator, whereas legacy citation precision used the returned list length.
+Ranks are chunk positions, with document-level relevance; repeated document
+hits do not increase recall. Missing/malformed traces yield unavailable
+metrics, not fabricated zeros. Unresolved `sha256-...` identities are listed
+in `agent_retrieval.unresolved_document_ids`.
+
+Audit an existing run without OCR, re-indexing, or paid model calls (from
+`eval-service/`):
+
+```bash
+python scripts/audit_answer_eval.py \
+  --report /path/to/ledger-eval-full-100-v1/combined.json \
+  --questions questions_setA_practice.json \
+  --identity-aliases identity_aliases.json \
+  --k 5 \
+  --output-dir results/full-100-v1-audit
+```
+
+This writes `audit.json` (per-question diagnostics and input hashes) and
+`audit.md`. The original run is preserved. The alias file is required by
+this audit command so a missing deployment asset cannot silently invalidate
+the result. New agent traces retain source identity metadata without passage
+text; the evaluator can resolve newly indexed hash-only citations from those
+traces even when the static alias map predates the document.
+
+See [EVALUATION_AUDIT.md](EVALUATION_AUDIT.md) for the measured full-100-v1
+findings. Use the existing direct retrieval benchmark for standalone engine
+evaluation; these agent traces include query rewriting and retries.
+
 - `POST /benchmark/run` — inline question list in the body:
 
   ```json

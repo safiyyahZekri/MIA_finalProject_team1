@@ -13,6 +13,8 @@ Built for a long run on a rate-limited API key:
     and the next invocation folds any stray batch file back in;
   * --resume skips questions already answered in the output directory;
   * --retry-errors re-runs only the questions that errored;
+  * --stop-after-errors ends the run after N errors in a row (default 3), so
+    an exhausted API quota does not turn every remaining question into one;
   * --delay spaces questions out to stay under a per-minute token limit, and
     the summary prints measured input tokens per minute to size it.
 
@@ -193,6 +195,16 @@ def print_summary(rows: list[dict], types: dict[str, str], ran: list[dict], elap
               f"= {ran_input / (elapsed_s / 60):.0f} input tokens/min")
 
 
+def trailing_errors(results: list[dict]) -> int:
+    """How many of the most recent results in a row are errors."""
+    count = 0
+    for row in reversed(results):
+        if not row.get("error"):
+            break
+        count += 1
+    return count
+
+
 def main() -> None:
     for stream in (sys.stdout, sys.stderr):
         # Redirected output on Windows defaults to cp1252: one "≤" in a gold
@@ -218,6 +230,8 @@ def main() -> None:
     parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUT)
     parser.add_argument("--label", default="", help="name recorded with the run, e.g. an experiment id")
     parser.add_argument("--agent-url", default="http://127.0.0.1:8003", help="read for the config snapshot")
+    parser.add_argument("--stop-after-errors", type=int, default=3,
+                        help="stop after this many errors in a row; 0 never stops")
     args = parser.parse_args()
 
     questions = json.loads(QUESTIONS.read_text(encoding="utf-8"))
@@ -273,6 +287,13 @@ def main() -> None:
         # Saved before printing, so a display failure can never lose results.
         write_combined(combined_path, rows, questions)
         print_rows(report["results"], types)
+        # A usage limit fails every question after it: stop instead of
+        # recording the rest of the run as errors.
+        streak = trailing_errors(ran)
+        if args.stop_after_errors and streak >= args.stop_after_errors:
+            print(f"\nstopping: the last {streak} questions failed ({_short(ran[-1].get('error'), 160)})")
+            print("saved results are kept; fix the cause, then rerun with --retry-errors or --resume")
+            break
 
     ordered = [rows[q["question_id"]] for q in questions if q["question_id"] in rows]
     print_summary(ordered, types, ran, time.monotonic() - started)

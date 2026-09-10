@@ -5,6 +5,34 @@ question, retrieves evidence via `retrieval-api`, grades that evidence,
 retries on weak evidence, reasons over it, and returns a
 schema-compliant, cited answer — never guessing or hallucinating a number.
 
+## Query decomposition (optional, no preprocessing)
+
+Set `QUERY_DECOMPOSITION=true` and restart the agent. A planning call asks the
+configured model for up to three focused searches for separate entities or
+operands. Simple questions can keep the single-query path. The planner sees
+only the question, not gold answers, source IDs, or dataset labels.
+
+The agent searches the original query and subqueries with its existing tools.
+It reserves a unique hit per subquery, then fills remaining slots by rank
+fusion. `TOP_K_FINAL`, normalized confidence, grading, calculation and citation
+validation remain in effect. Distinct chunks on the same page survive the
+merge. Subquery results persist within this request's retries, without any
+shared cache or index writes.
+
+The feature is off by default for baseline comparison. Enabling it adds one
+planning call per question and, for a split question, up to six additional
+retrieval calls. Plans are bounded to three subqueries and rejected if the
+evidence budget cannot accommodate them. Planning failures log a fallback
+and use the ordinary query; retrieval errors still surface normally.
+
+Anthropic, Groq and Ollama use model-generated, validated plans. Mock mode
+returns no split and cannot establish accuracy gains. `/health` records
+`query_decomposition`; traces record planning usage, subquery latencies,
+document IDs, and the merged ranking without adding full document text.
+
+Follow the [off/on experiment guide](../eval-service/QUERY_DECOMPOSITION_EXPERIMENT.md)
+to measure EM/F1 changes using the existing corpus.
+
 ## Run it right now (zero config)
 
 ```bash
@@ -222,3 +250,25 @@ agent-service/
 ├── .env.example
 └── README.md
 ```
+
+## Gemini provider
+
+`LLM_PROVIDER=gemini` runs the agent on Google Gemini through the official
+`google-genai` SDK, with the same prompts and failure handling as the
+Anthropic provider. Set `GEMINI_API_KEY` (a Google AI Studio key) and
+optionally `GEMINI_MODEL`, `GEMINI_TEMPERATURE`, `GEMINI_MAX_OUTPUT_TOKENS`
+and `GEMINI_MAX_ATTEMPTS`. Rate limits are retried with backoff inside the
+SDK; truncated or blocked output is reported as an error, not an answer.
+
+## Enhancement switches
+
+Each is off by default and reported by `/health`, so a saved run records
+which were on. None needs re-indexing.
+
+| setting | effect |
+|---|---|
+| `QUERY_DECOMPOSITION` | split multi-company or multi-item questions into separate searches |
+| `ANSWER_FORMAT_FIXES` | keep scale words, keep page numbers out of answers and grading, prefer table figures, count only the year-on-year changes inside a period |
+| `GRADE_COMPANY_CONTEXT` | accept a passage that names no company when nothing ties it to a different company |
+| `GRADE_REQUIRE_NAMED_TABLE` | require evidence from a table or section the question names |
+| `RANK_FUSION_MERGE` | merge a retrieve step's searches by rank instead of raw score |

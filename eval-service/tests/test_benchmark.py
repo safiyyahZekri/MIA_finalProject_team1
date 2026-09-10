@@ -113,6 +113,11 @@ def test_run_benchmark_end_to_end(monkeypatch):
     assert summary["retrieval_recall_at_k"] == 1.0
     assert summary["num_errors"] == 0
     assert summary["avg_retries_used"] == 0.5  # (0 + 1) / 2, from the confirmed contract's field
+    assert summary["citation"]["hit_rate"] == 1.0
+    # The fake agent has no retrieval trace: its citation must not be used
+    # to fabricate retrieval-only quality.
+    assert summary["agent_retrieval"]["final_attempt"]["scored_questions"] == 0
+    assert report["metric_definitions"]["legacy_retrieval"]
 
 
 # ---------------------------------------------------------------------------
@@ -120,6 +125,32 @@ def test_run_benchmark_end_to_end(monkeypatch):
 # question dicts, to confirm the harness parses the confirmed record schema
 # correctly on the first try.
 # ---------------------------------------------------------------------------
+
+
+def test_benchmark_scores_ranked_retrieval_when_agent_declines(monkeypatch):
+    import app.benchmark as bench_module
+
+    class DecliningClient(FakeClient):
+        def post(self, url, json=None):
+            assert json["document_id"] is None  # no gold scoping
+            return FakeResponse({
+                "answer": {"answer_type": "insufficient_evidence", "evidence": [],
+                           "params": {"reason": "company not identified"}},
+                "trace": [{"step": "retrieve", "hits": ["sha256-old:p1"]}],
+            })
+
+    monkeypatch.setattr(bench_module.httpx, "Client", DecliningClient)
+    report = run_benchmark(BenchmarkConfig(
+        system_url="http://fake-system/ask",
+        questions=[{"question_id": "q", "question_text": "Revenue?", "ground_truth_answer": 10,
+                    "answer_type": "arithmetic", "gold_evidence": [{"source_doc_uid": "gold"}]}],
+        identity_aliases={"sha256-old": "gold"},
+    ))
+    row = report["results"][0]
+    assert row["exact_match"] == 0
+    assert row["citation"]["hit_rate"] == 0
+    assert row["agent_retrieval"]["final_attempt"]["hit_rate"] == 1
+    assert report["summary"]["agent_retrieval"]["final_attempt"]["hit_rate"] == 1
 
 
 def _load_real_questions():

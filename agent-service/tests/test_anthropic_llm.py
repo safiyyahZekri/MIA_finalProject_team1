@@ -91,6 +91,15 @@ def test_api_failure_propagates_from_classify(opus5):
         llm.classify("q")
 
 
+def test_decomposition_uses_structured_output_and_records_usage(opus5):
+    llm, messages = _llm(_response(text='{"subqueries":["Orion 2021 revenue","Lyra 2021 revenue"]}'))
+    plan = llm.decompose("Compare Orion and Lyra 2021 revenue")
+    assert len(plan.subqueries) == 2
+    assert len(messages.requests) == 1
+    assert messages.requests[0]["output_config"]["format"]["schema"]["title"] == "QueryPlan"
+    assert llm.last_usage["prompt_tokens"] == 120
+
+
 @pytest.mark.parametrize("question_type", ["numerical", "text"])
 def test_refusal_is_an_error_not_an_answer(opus5, question_type):
     llm, _ = _llm(_response(stop_reason="refusal"))

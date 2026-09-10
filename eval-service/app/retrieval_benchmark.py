@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import logging
 import statistics
 import time
 import uuid
@@ -37,7 +38,11 @@ def load_identity_aliases(path: Path | None = None) -> dict[str, str]:
     target = path or IDENTITY_ALIASES_PATH
     try:
         raw = json.loads(target.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except (OSError, json.JSONDecodeError) as exc:
+        logging.getLogger(__name__).warning(
+            "Identity aliases unavailable at %s (%s); hash-only evidence may score as misses",
+            target, exc,
+        )
         return {}
     return {str(k): str(v) for k, v in raw.items()} if isinstance(raw, dict) else {}
 

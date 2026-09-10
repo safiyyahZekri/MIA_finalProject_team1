@@ -22,12 +22,18 @@ def _bool(name: str, default: bool) -> bool:
     return val.strip().lower() in ("1", "true", "yes", "on")
 
 
+def _float_or_none(name: str) -> float | None:
+    val = os.getenv(name, "").strip()
+    return float(val) if val else None
+
+
 class Settings:
     # --- LLM ---
     # "mock"      -> zero-dependency heuristic/regex "LLM" (default, always works)
     # "ollama"    -> real local LLM (e.g. qwen2.5) served by `ollama serve`
     # "groq"      -> hosted LLM via Groq's fast, OpenAI-compatible API
     # "anthropic" -> real, resource-efficient Claude model via ANTHROPIC_API_KEY
+    # "gemini"    -> Google Gemini via GEMINI_API_KEY (a Google AI Studio key)
     LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "mock")
     ANTHROPIC_MODEL: str = os.getenv("ANTHROPIC_MODEL", "claude-opus-5")
     ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
@@ -47,6 +53,26 @@ class Settings:
     # Defaults are Claude Opus 5 list prices; override for another model.
     ANTHROPIC_INPUT_USD_PER_MTOK: float = float(os.getenv("ANTHROPIC_INPUT_USD_PER_MTOK", "5.0"))
     ANTHROPIC_OUTPUT_USD_PER_MTOK: float = float(os.getenv("ANTHROPIC_OUTPUT_USD_PER_MTOK", "25.0"))
+
+    # --- Google Gemini (hosted LLM via the official google-genai SDK) ---
+    # A key from Google AI Studio. GOOGLE_API_KEY, the name the SDK itself
+    # looks for, is accepted too.
+    GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "") or os.getenv("GOOGLE_API_KEY", "")
+    GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+    # Thinking models spend part of this cap on thinking; too small a cap
+    # truncates the answer, which is reported as an error.
+    GEMINI_MAX_OUTPUT_TOKENS: int = int(os.getenv("GEMINI_MAX_OUTPUT_TOKENS", "16000"))
+    # Empty keeps the model's default. A low value makes repeated runs more
+    # alike, which helps small before/after experiments; follow the chosen
+    # model's guidance, since some are tuned for their default.
+    GEMINI_TEMPERATURE: float | None = _float_or_none("GEMINI_TEMPERATURE")
+    # Tries per request, including the first. 429 and 5xx responses are
+    # retried with exponential backoff up to 60 s between tries.
+    GEMINI_MAX_ATTEMPTS: int = int(os.getenv("GEMINI_MAX_ATTEMPTS", "8"))
+    # USD per million tokens for the cost report. Both 0 (a free-tier key)
+    # reports no cost.
+    GEMINI_INPUT_USD_PER_MTOK: float = float(os.getenv("GEMINI_INPUT_USD_PER_MTOK", "0"))
+    GEMINI_OUTPUT_USD_PER_MTOK: float = float(os.getenv("GEMINI_OUTPUT_USD_PER_MTOK", "0"))
 
     # --- Groq (hosted LLM, OpenAI-compatible) ---
     GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
@@ -83,12 +109,30 @@ class Settings:
     TOP_K_OVERRETRIEVE: int = int(os.getenv("TOP_K_OVERRETRIEVE", "30"))
     TOP_K_FINAL: int = int(os.getenv("TOP_K_FINAL", "5"))
     MAX_RETRIES: int = int(os.getenv("MAX_RETRIES", "2"))
+    QUERY_DECOMPOSITION: bool = _bool("QUERY_DECOMPOSITION", False)
     # Grading also requires the evidence to be tied to the company the question
     # names. On the stratified 10-question set it stopped A017 -- an unanswerable
     # Atlassian question answered from STMicroelectronics' table -- in every run,
     # but also refused A009 in two of three runs, where the excerpt holding the
     # fact never names the company (eval-service/EXPERIMENTS.md, finding 3).
     GRADE_REQUIRE_ENTITY_MATCH: bool = _bool("GRADE_REQUIRE_ENTITY_MATCH", True)
+
+    # Enhancements from eval-service/FAILURE_ANALYSIS_E2E.md. Each is off by
+    # default, so an experiment can switch on exactly one; none needs
+    # re-indexing. /health reports all of them with every saved run.
+    # Answer format and calculation rules: keep scale words, keep page
+    # numbers out of answers and grading, prefer table figures, and count only
+    # the year-on-year changes inside a stated period (A086, A013, A014, A007).
+    ANSWER_FORMAT_FIXES: bool = _bool("ANSWER_FORMAT_FIXES", False)
+    # With GRADE_REQUIRE_ENTITY_MATCH: accept a passage that names no company
+    # when it fits the question and nothing ties it to a different company
+    # (A035, A001). Evidence belonging to another company is still refused.
+    GRADE_COMPANY_CONTEXT: bool = _bool("GRADE_COMPANY_CONTEXT", False)
+    # A question that names a table or section needs evidence from it (A068).
+    GRADE_REQUIRE_NAMED_TABLE: bool = _bool("GRADE_REQUIRE_NAMED_TABLE", False)
+    # Merge a retrieve step's two searches by rank (reciprocal rank fusion)
+    # instead of raw score, whose scale differs between endpoints (A013).
+    RANK_FUSION_MERGE: bool = _bool("RANK_FUSION_MERGE", False)
     MIN_EVIDENCE_SCORE: float = float(os.getenv("MIN_EVIDENCE_SCORE", "0.35"))
 
     # --- Service ---
