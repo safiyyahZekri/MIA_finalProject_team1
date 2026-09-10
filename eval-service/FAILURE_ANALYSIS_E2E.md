@@ -20,8 +20,9 @@ aliases. See the last section for where this analysis changes its conclusions.
    (`agent.01.classify`, `agent.02.retrieve`, `agent.03.grade`, …). Those spans
    hold the rewritten queries, the pages retrieved on each attempt, and the
    grader's reasons. The eleven questions below were run again twice after the
-   change ("replays"). That gives every case a trace with its steps, and shows
-   whether each failure recurs; see [Traces](#traces).
+   change ("replays"). This shows whether each failure recurs, and gives the
+   nine that recurred a trace showing the failure step by step; see
+   [Traces](#traces).
 2. **Is the fact in the index?** Search the gold page's chunks for the gold
    facts. If a fact is missing or garbled, the failure started at OCR, table
    extraction or chunking.
@@ -49,6 +50,48 @@ aliases. See the last section for where this analysis changes its conclusions.
 | [A014](#a014) | arithmetic | numerical reasoning | Used rounded narrative figures in millions over the exact table in thousands; the answer carries no unit | prefer table cells; a scale field on calculated answers |
 | [A086](#a086) | multi-span | generation | Our own format rule stripped "million" from the answer span | reword the rule to keep scale words |
 | [A077](#a077) | span | question ambiguity, with grading | "HC2's SG&A decrease" has two answers in the report; the company rule picked the passage naming HC2 | flag in the benchmark; grader declines on competing figures |
+
+### Each case in one line
+
+- **A003:** expected 659,439.4 (Atlassian's average total equity), but the
+  agent declined because no Atlassian page was retrieved → root cause:
+  retrieval failure (pages are indexed without their company) → fix:
+  metadata-aware retrieval.
+- **A035:** expected "calculated using the two-class method…", but the agent
+  declined after retrieving that passage → root cause: grading (the company
+  rule refused a page that never names HC2), with the reranker demoting the
+  passage → fix: company metadata shown to the grader.
+- **A001:** expected 304,811, but the agent declined: CTS's table never reached
+  the top 5, and Jabil's was refused as unnamed → root cause: retrieval
+  failure (one query for two companies) → fix: query decomposition.
+- **A068:** expected 2019–2015, but got 2019–2017 from a different Plexus
+  table → root cause: retrieval ranking (the right table ranked 11th, its
+  heading extracted as a table row), then grading (the wrong table was
+  accepted) → fix: title-aware table chunks, and a grader that requires the
+  named table.
+- **A037:** expected seven cost lines and segments, but got three segment
+  names → root cause: chunking (the table chunk has no heading, only an
+  unrelated context line) → fix: contextual chunk headers.
+- **A013:** expected "due to the adoption of ASC 606", but got "adjusted due to
+  the adoption OfASC 606" plus "p1" → root cause: OCR (merged "OfASC"), then
+  generation (the page went into the answer) → fix: OCR token repair, and the
+  page taken from citations.
+- **A007:** expected 15.16, but got 11.40 → root cause: numerical reasoning
+  (three year-on-year changes averaged instead of two) → fix: a period rule
+  in the calculation prompt.
+- **A014:** expected 31,252 (thousand), but got 31.27 (million) → root cause:
+  numerical reasoning (rounded text figures used instead of the exact table,
+  and no unit) → fix: prefer table figures, and a scale on calculated answers.
+- **A086:** expected "$12.2 million, $23.6 million, $38.6 million", but got
+  "$12.2, $23.6, $38.6" → root cause: generation (the format rule stripped
+  "million") → fix: keep scale words.
+- **A077:** expected "$5.0 million" (Life Sciences), but got −8.6 (the
+  Corporate segment) → root cause: an ambiguous question, with grading
+  picking the passage that names HC2 → fix: flag the question, and a grader
+  that declines on competing figures.
+- **A038:** expected 7,473.33, but got 77.33 from IBM's "average recorded
+  investment" disclosure → root cause: ambiguous question wording → fix: flag
+  the question.
 
 ---
 
@@ -438,9 +481,15 @@ spans are unnumbered, so they are not linked.
 | A077 | wrong · wrong · wrong | [original](https://cloud.langfuse.com/project/cmtv69p2f070wad0dt27on2ut/traces/2fbf678bc2e3aee424c6df1f2ebbdfb1) | [replay 2](https://cloud.langfuse.com/project/cmtv69p2f070wad0dt27on2ut/traces/5c2e1cf28c37aa75557648a4cef2dad8) |
 | A038 | wrong · wrong · wrong | [original](https://cloud.langfuse.com/project/cmtv69p2f070wad0dt27on2ut/traces/92edbc93d1e30942144a5f6b4d5cd844) | [replay 2](https://cloud.langfuse.com/project/cmtv69p2f070wad0dt27on2ut/traces/dcf84d5b3afb5b17ddabf0cde4de5bd4) |
 
-Nine of the eleven failed the same way in all three runs. The step evidence
-quoted in the cases comes from the original run. Where the replays differ in
-detail, the failure is the same:
+Nine of the eleven failed the same way in all three runs, so their replay-2
+traces show the failure step by step. A007 and A086 were correct in both
+replays, so no trace with agent steps shows their failure. For those two, the
+evidence quoted comes from the steps saved in the original run's results
+(`results/answer-eval/full-100-v1/combined.json`), and the replay traces show
+the corrected runs.
+
+The step evidence quoted in the other cases also comes from the original
+run. Where the replays differ in detail, the failure is the same:
 - **A035:** the replays never retrieved the two-class passage, and the grader
   refused for the same reason (no evidence tied to HC2).
 - **A001:** replay 2 again retrieved Jabil's table on attempt 2 and refused it:
