@@ -4,8 +4,8 @@ LLM abstraction used by the LangGraph nodes.
 Two interchangeable providers implement the same interface:
   - MockLLM       : pure heuristics/regex, zero external dependencies.
                     Default, so the service runs immediately with no API key.
-  - AnthropicLLM  : a real, resource-efficient Claude model
-                    (claude-haiku-4-5 by default) via structured output.
+  - AnthropicLLM  : Claude (claude-opus-5 by default) through the official
+                    Anthropic SDK, via structured outputs.
 
 Only classification, query reformulation, evidence grading, and *proposing*
 extraction candidates go through the LLM. The actual arithmetic always goes
@@ -91,17 +91,22 @@ class EvidenceGrade(BaseModel):
 class ExtractionDirect(BaseModel):
     shape: Literal["direct"] = "direct"
     value: str
+    # 1-based numbers of the evidence passages the answer was taken from, as
+    # numbered in the extraction prompt. Empty means the model named none.
+    evidence_indexes: List[int] = Field(default_factory=list)
 
 
 class ExtractionMultiSpan(BaseModel):
     shape: Literal["multi_span"] = "multi_span"
     values: List[str]
+    evidence_indexes: List[int] = Field(default_factory=list)
 
 
 class ExtractionCalculated(BaseModel):
     shape: Literal["calculated"] = "calculated"
     formula: str  # numeric literals only, e.g. "(3875-3410)/3410*100"
     operand_count: int
+    evidence_indexes: List[int] = Field(default_factory=list)
 
 
 class ExtractionInsufficient(BaseModel):
@@ -127,12 +132,15 @@ class ExtractionChoice(BaseModel):
     value: Optional[str] = None
     values: Optional[List[str]] = None
     reason: Optional[str] = None
+    evidence_indexes: List[int] = Field(default_factory=list)
 
     def as_extraction(self):
         if self.shape == "direct" and self.value is not None:
-            return ExtractionDirect(value=str(self.value))
+            return ExtractionDirect(value=str(self.value), evidence_indexes=self.evidence_indexes)
         if self.shape == "multi_span" and self.values:
-            return ExtractionMultiSpan(values=[str(v) for v in self.values])
+            return ExtractionMultiSpan(
+                values=[str(v) for v in self.values], evidence_indexes=self.evidence_indexes
+            )
         if self.shape == "insufficient":
             return ExtractionInsufficient(reason=self.reason or "Insufficient evidence.")
         # A shape was declared but its payload field came back empty.
@@ -563,95 +571,204 @@ class GroqLLM:
 
 
 # --------------------------------------------------------- anthropic impl --
-class AnthropicLLM:
-    """Real, resource-efficient Claude model via structured output.
+class StructuredOutputError(ValueError):
+    """The model answered, but not in the requested schema."""
 
-    Requires `langchain-anthropic` and ANTHROPIC_API_KEY. Only imported/
-    instantiated when LLM_PROVIDER=anthropic, so the mock path has zero
-    extra runtime dependencies.
+
+class ModelOutputError(RuntimeError):
+    """The model produced no usable answer at all: it declined the request
+    (after any server-side fallback), or its output was cut off at max_tokens.
+
+    Raised rather than folded into insufficient evidence: a question the model
+    never answered must surface as an error, not score as a wrong answer."""
+
+
+class AnthropicLLM:
+    """Claude through the official Anthropic SDK, with structured outputs.
+
+    Built for Claude Opus 5, whose request surface differs from earlier models
+    in ways that fail loudly or silently:
+      * sampling parameters (temperature, top_p, top_k) are rejected with a
+        400, so none are sent;
+      * thinking is on by default and max_tokens caps thinking plus the answer,
+        so the budget is sized for both (ANTHROPIC_MAX_TOKENS);
+      * safety classifiers can decline a request with stop_reason "refusal",
+        so `fallbacks: "default"` re-runs it server-side, and stop_reason is
+        checked before any content is read.
+
+    Structured output goes through output_config.format rather than
+    messages.parse(). parse() validates the JSON before returning, so a
+    response truncated at max_tokens would raise a schema error before
+    stop_reason could be checked -- and score as "insufficient evidence"
+    instead of being reported as a truncation.
+
+    Failure handling is deliberately asymmetric. API failures (rate limits,
+    overload, network) are retried inside the SDK and otherwise propagate, as
+    do refused and truncated outputs, so the caller records an error. Only a
+    complete response that does not fit the schema becomes an
+    insufficient-evidence answer.
     """
 
-    def __init__(self) -> None:
-        from langchain_anthropic import ChatAnthropic  # local import by design
+    FALLBACKS_BETA = "server-side-fallback-2026-07-01"
 
-        self._base = ChatAnthropic(
-            model=settings.ANTHROPIC_MODEL,
+    def __init__(self) -> None:
+        import anthropic  # local import by design: the mock path needs no SDK
+
+        self._client = anthropic.Anthropic(
             api_key=settings.ANTHROPIC_API_KEY,
-            temperature=0,
-            max_tokens=512,
+            max_retries=settings.ANTHROPIC_MAX_RETRIES,
         )
+        self._transform_schema = anthropic.transform_schema
+        # Same shape OllamaLLM/GroqLLM expose, so app.graph attaches per-call
+        # token usage to the trace for every provider alike.
+        self.last_usage: dict = {}
+
+    def _create(self, prompt: str, schema=None) -> str:
+        """One request; returns the answer text once it is known to be complete."""
+        output_config: dict = {}
+        if settings.ANTHROPIC_EFFORT:
+            output_config["effort"] = settings.ANTHROPIC_EFFORT
+        if schema is not None:
+            output_config["format"] = {"type": "json_schema", "schema": self._transform_schema(schema)}
+        request: dict = {
+            "model": settings.ANTHROPIC_MODEL,
+            "max_tokens": settings.ANTHROPIC_MAX_TOKENS,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+        if output_config:
+            request["output_config"] = output_config
+        if settings.ANTHROPIC_FALLBACKS:
+            request["fallbacks"] = settings.ANTHROPIC_FALLBACKS
+            request["betas"] = [self.FALLBACKS_BETA]
+
+        self.last_usage = {}
+        response = self._client.beta.messages.create(**request)
+
+        usage = response.usage
+        self.last_usage = {
+            # Cached input still counts toward input-token rate limits.
+            "prompt_tokens": (usage.input_tokens or 0)
+            + (getattr(usage, "cache_read_input_tokens", None) or 0)
+            + (getattr(usage, "cache_creation_input_tokens", None) or 0),
+            # Output tokens include thinking, which is billed as output.
+            "completion_tokens": usage.output_tokens,
+        }
+        if response.stop_reason == "refusal":
+            category = getattr(getattr(response, "stop_details", None), "category", None)
+            raise ModelOutputError(f"model declined the request (refusal category: {category})")
+        if response.stop_reason == "max_tokens":
+            raise ModelOutputError(
+                f"output truncated at max_tokens={settings.ANTHROPIC_MAX_TOKENS}; thinking "
+                "counts toward it, so raise ANTHROPIC_MAX_TOKENS"
+            )
+
+        text: List[str] = []
+        for block in response.content:
+            if block.type == "fallback":
+                # A switch point: text before it came from a model that declined.
+                text = []
+            elif block.type == "text":
+                text.append(block.text)
+        return "".join(text)
+
+    def _structured(self, schema, prompt: str):
+        text = self._create(prompt, schema)
+        try:
+            return schema.model_validate_json(text)
+        except ValidationError as exc:
+            raise StructuredOutputError(f"{schema.__name__}: {exc}") from exc
 
     def classify(self, question: str) -> Classification:
-        llm = self._base.with_structured_output(Classification)
-        return llm.invoke(
+        return self._structured(
+            Classification,
             "Classify this financial-document question for retrieval routing.\n"
             "question_type must be exactly one of: numerical, table, text.\n"
             "- numerical: requires arithmetic (comparison, % change, sum, ratio, etc.)\n"
             "- table: answer likely lives in a financial table/line item, no math needed\n"
             "- text: narrative/prose answer\n"
             "search_query: a focused retrieval query derived from the question.\n\n"
-            f"Question: {question}"
+            f"Question: {question}",
         )
 
     def reformulate(self, question: str, previous_query: str, attempt: int) -> str:
-        llm = self._base
-        resp = llm.invoke(
+        query = self._create(
             "The previous retrieval query returned insufficient evidence.\n"
             f"Original question: {question}\n"
             f"Previous query: {previous_query}\n"
             "Propose ONE broader or differently-phrased retrieval query "
             "(no explanation, just the query text)."
-        )
-        return resp.content.strip()
+        ).strip()
+        return query or previous_query
 
     def grade(self, question: str, evidence: List[dict]) -> EvidenceGrade:
-        llm = self._base.with_structured_output(EvidenceGrade)
         snippets = "\n---\n".join(
             f"[{e.get('document_id')} p{e.get('page')} score={e.get('score')}]\n{e.get('text','')}"
             for e in evidence
         ) or "(no evidence retrieved)"
-        return llm.invoke(
+        entity_rule = ""
+        if settings.GRADE_REQUIRE_ENTITY_MATCH:
+            # Many excerpts never name their company, so figures that fit the
+            # question can come from another company's table entirely.
+            entity_rule = (
+                "If the question names a company, the evidence must be identifiably that "
+                "company's: its name, or something unambiguous about it, appears in the "
+                "evidence. Figures that fit the question but cannot be tied to the named "
+                "company are not sufficient.\n"
+            )
+        return self._structured(
+            EvidenceGrade,
             "Judge whether the evidence below is sufficient to confidently and "
             "faithfully answer the question. Be strict: if the exact fact/number "
-            "needed isn't present, sufficient=false.\n\n"
-            f"Question: {question}\n\nEvidence:\n{snippets}"
+            "needed isn't present, sufficient=false.\n"
+            f"{entity_rule}\n"
+            f"Question: {question}\n\nEvidence:\n{snippets}",
         )
 
     def extract(self, question: str, question_type: str, evidence: List[dict]):
+        # Numbered, so extraction can name the passages its answer came from
+        # and the answer can cite exactly those.
         snippets = "\n---\n".join(
-            f"[{e.get('document_id')} p{e.get('page')}]\n{e.get('text','')}" for e in evidence
+            f"[{i}] {e.get('document_id')} p{e.get('page')}\n{e.get('text','')}"
+            for i, e in enumerate(evidence, start=1)
         )
         if question_type == "numerical":
-            llm = self._base.with_structured_output(ExtractionCalculated)
             try:
-                return llm.invoke(
+                return self._structured(
+                    ExtractionCalculated,
                     "Extract the numeric operands from the evidence needed to answer the "
                     "question and express the calculation as a pure-arithmetic formula "
                     "using ONLY the literal numbers found in the evidence "
-                    "(e.g. '(3875-3410)/3410*100'). Do not compute the result yourself.\n\n"
-                    f"Question: {question}\n\nEvidence:\n{snippets}"
+                    "(e.g. '(3875-3410)/3410*100'). Do not compute the result yourself.\n"
+                    "Set evidence_indexes to the numbers of the passages the operands were "
+                    "taken from.\n\n"
+                    f"Question: {question}\n\nEvidence:\n{snippets}",
                 )
-            except Exception:
+            except StructuredOutputError:
                 return ExtractionInsufficient(reason="Could not extract numeric operands.")
 
         # Let the model choose direct vs multi_span vs insufficient.
-        llm = self._base.with_structured_output(ExtractionChoice)
         try:
-            choice = llm.invoke(
+            choice = self._structured(
+                ExtractionChoice,
                 "Answer the question using ONLY the evidence below. Set shape to "
                 "exactly one of:\n"
                 "- direct: a single fact/value -- fill `value`\n"
                 "- multi_span: two or more distinct values/items -- fill `values`\n"
                 "- insufficient: the evidence doesn't contain the answer -- fill `reason`\n"
-                "Leave the fields belonging to the other shapes unset.\n\n"
-                f"Question: {question}\n\nEvidence:\n{snippets}"
+                "Leave the fields belonging to the other shapes unset.\n"
+                # Opus 5 writes fuller answers by default -- "2019: $2,657
+                # thousand" for a cell reading "2,657" -- which exact match
+                # scores as wrong even when the fact is right.
+                "Copy each value exactly as it is written in the evidence, as the shortest "
+                "span that answers the question. Do not add labels, years, units, currency "
+                "symbols or explanation that are not part of that span.\n"
+                "Set evidence_indexes to the numbers of the passages the answer was taken "
+                "from.\n\n"
+                f"Question: {question}\n\nEvidence:\n{snippets}",
             )
-        except Exception as exc:  # noqa: BLE001 -- one bad call must not kill a run
-            # Named distinctly so a systemic failure reads as 100 identical
-            # "extraction call failed" reasons in the report rather than as
-            # 100 plausible-looking "insufficient evidence" verdicts.
-            logger.exception("Anthropic extract() failed: %s", exc)
-            return ExtractionInsufficient(reason=f"Extraction call failed: {exc}")
+        except StructuredOutputError as exc:
+            logger.warning("Anthropic extract() returned no usable structure: %s", exc)
+            return ExtractionInsufficient(reason=f"Model response did not match the schema: {exc}")
         return choice.as_extraction()
 
 

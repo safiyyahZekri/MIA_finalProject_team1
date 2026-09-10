@@ -44,7 +44,21 @@ def test_extraction_choice_converts_to_a_tool_schema():
 def test_schema_is_flat_so_providers_need_not_support_nested_oneof():
     schema = ExtractionChoice.model_json_schema()
     assert not schema.get("$defs"), "nested model refs defeat the point of flattening"
-    assert set(schema["properties"]) == {"shape", "value", "values", "reason"}
+    assert set(schema["properties"]) == {"shape", "value", "values", "reason", "evidence_indexes"}
+
+
+@pytest.mark.parametrize(
+    "payload,expected",
+    [
+        ({"shape": "direct", "value": "3,875", "evidence_indexes": [2]}, [2]),
+        ({"shape": "multi_span", "values": ["a", "b"], "evidence_indexes": [1, 3]}, [1, 3]),
+        ({"shape": "direct", "value": "3,875"}, []),
+    ],
+)
+def test_narrowing_keeps_the_evidence_the_model_named(payload, expected):
+    """Citations are built from these; dropping them here would silently
+    fall back to citing the top-ranked hits."""
+    assert ExtractionChoice(**payload).as_extraction().evidence_indexes == expected
 
 
 @pytest.mark.parametrize(

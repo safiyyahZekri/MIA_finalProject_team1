@@ -29,8 +29,24 @@ class Settings:
     # "groq"      -> hosted LLM via Groq's fast, OpenAI-compatible API
     # "anthropic" -> real, resource-efficient Claude model via ANTHROPIC_API_KEY
     LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "mock")
-    ANTHROPIC_MODEL: str = os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
+    ANTHROPIC_MODEL: str = os.getenv("ANTHROPIC_MODEL", "claude-opus-5")
     ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
+    # The Anthropic SDK retries 429/529/5xx itself and honours retry-after, so
+    # a per-minute rate limit becomes a wait rather than a failed question.
+    ANTHROPIC_MAX_RETRIES: int = int(os.getenv("ANTHROPIC_MAX_RETRIES", "8"))
+    # Claude Opus 5 thinks by default, and max_tokens caps thinking plus the
+    # answer together: too small a budget truncates the answer itself.
+    ANTHROPIC_MAX_TOKENS: int = int(os.getenv("ANTHROPIC_MAX_TOKENS", "16000"))
+    # low | medium | high | xhigh | max. Empty sends none -- the API default,
+    # high on Claude Opus 5. Lower effort is the main token and latency lever.
+    ANTHROPIC_EFFORT: str = os.getenv("ANTHROPIC_EFFORT", "").strip()
+    # "default" re-runs a declined request server-side on Anthropic's
+    # recommended substitute model. Empty disables it.
+    ANTHROPIC_FALLBACKS: str = os.getenv("ANTHROPIC_FALLBACKS", "default").strip()
+    # USD per million tokens, used only to report approximate cost per query.
+    # Defaults are Claude Opus 5 list prices; override for another model.
+    ANTHROPIC_INPUT_USD_PER_MTOK: float = float(os.getenv("ANTHROPIC_INPUT_USD_PER_MTOK", "5.0"))
+    ANTHROPIC_OUTPUT_USD_PER_MTOK: float = float(os.getenv("ANTHROPIC_OUTPUT_USD_PER_MTOK", "25.0"))
 
     # --- Groq (hosted LLM, OpenAI-compatible) ---
     GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
@@ -67,6 +83,12 @@ class Settings:
     TOP_K_OVERRETRIEVE: int = int(os.getenv("TOP_K_OVERRETRIEVE", "30"))
     TOP_K_FINAL: int = int(os.getenv("TOP_K_FINAL", "5"))
     MAX_RETRIES: int = int(os.getenv("MAX_RETRIES", "2"))
+    # Grading also requires the evidence to be tied to the company the question
+    # names. On the stratified 10-question set it stopped A017 -- an unanswerable
+    # Atlassian question answered from STMicroelectronics' table -- in every run,
+    # but also refused A009 in two of three runs, where the excerpt holding the
+    # fact never names the company (eval-service/EXPERIMENTS.md, finding 3).
+    GRADE_REQUIRE_ENTITY_MATCH: bool = _bool("GRADE_REQUIRE_ENTITY_MATCH", True)
     MIN_EVIDENCE_SCORE: float = float(os.getenv("MIN_EVIDENCE_SCORE", "0.35"))
 
     # --- Service ---

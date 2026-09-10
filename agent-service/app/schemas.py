@@ -103,3 +103,9 @@ class AnswerResponse(BaseModel):
     question_type: str
     retries_used: int
     trace: list
+    # System-performance figures eval-service reads from the top level.
+    llm_calls: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    tokens_used: int = 0
+    cost_usd: Optional[float] = None

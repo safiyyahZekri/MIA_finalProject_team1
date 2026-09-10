@@ -37,6 +37,19 @@ app = FastAPI(title="LEDGER agent-service", version="1.0.0")
 @app.get("/health")
 async def health():
     body = {"status": "ok", "llm_provider": settings.LLM_PROVIDER}
+    # The settings experiments vary, so a saved run records exactly what ran.
+    body["config"] = {
+        "top_k_final": settings.TOP_K_FINAL,
+        "max_retries": settings.MAX_RETRIES,
+        "grade_require_entity_match": settings.GRADE_REQUIRE_ENTITY_MATCH,
+    }
+    if settings.LLM_PROVIDER == "anthropic":
+        body["config"].update(
+            model=settings.ANTHROPIC_MODEL,
+            effort=settings.ANTHROPIC_EFFORT or "api-default",
+            max_tokens=settings.ANTHROPIC_MAX_TOKENS,
+            fallbacks=settings.ANTHROPIC_FALLBACKS or None,
+        )
     if settings.LLM_PROVIDER == "ollama":
         from app.llm import OllamaLLM  # local import: avoid httpx.Client at module load
 
@@ -90,6 +103,28 @@ async def _call_validator(answer: dict) -> dict | None:
         return {"error": str(exc)}
 
 
+def _usage_summary(trace: list) -> dict:
+    """LLM calls, tokens and approximate cost for one question, read from the
+    per-call usage the graph already attaches to its trace steps."""
+    calls = [step["usage"] for step in trace if isinstance(step, dict) and step.get("usage")]
+    input_tokens = sum(usage.get("prompt_tokens") or 0 for usage in calls)
+    output_tokens = sum(usage.get("completion_tokens") or 0 for usage in calls)
+    cost_usd = None
+    if settings.LLM_PROVIDER == "anthropic":
+        cost_usd = round(
+            input_tokens / 1_000_000 * settings.ANTHROPIC_INPUT_USD_PER_MTOK
+            + output_tokens / 1_000_000 * settings.ANTHROPIC_OUTPUT_USD_PER_MTOK,
+            6,
+        )
+    return {
+        "llm_calls": len(calls),
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "tokens_used": input_tokens + output_tokens,
+        "cost_usd": cost_usd,
+    }
+
+
 async def _run_and_validate(req: AnswerRequest) -> dict:
     """Shared logic for both endpoints: run the graph, guarantee an
     `answer`, and optionally call answer-validator-api directly. Returns
@@ -98,7 +133,14 @@ async def _run_and_validate(req: AnswerRequest) -> dict:
     if not req.question or not req.question.strip():
         raise HTTPException(status_code=422, detail="question must not be empty")
 
-    final_state = await run_agent(req.question, req.document_id)
+    try:
+        final_state = await run_agent(req.question, req.document_id)
+    except Exception as exc:  # noqa: BLE001 -- re-raised as an HTTP error, not swallowed
+        # An LLM or retrieval failure the SDK's own retries could not absorb.
+        # Report it with its cause so a caller records an error -- never an
+        # answer that could be scored as if the model had seen the question.
+        logger.exception("agent run failed")
+        raise HTTPException(status_code=503, detail=f"{type(exc).__name__}: {exc}") from exc
     answer = final_state.get("answer")
     if answer is None:
         # Should be unreachable: every graph path sets `answer`. Fail safe rather
@@ -136,11 +178,13 @@ async def answer_question(req: AnswerRequest):
     eval-service, which needs the trace. The orchestrator should call
     /agent/query instead."""
     final_state = await _run_and_validate(req)
+    trace = final_state.get("trace", [])
     return AnswerResponse(
         answer=final_state["answer"],
         question_type=final_state.get("question_type", "unknown"),
         retries_used=final_state.get("retry_count", 0),
-        trace=final_state.get("trace", []),
+        trace=trace,
+        **_usage_summary(trace),
     )
 
 

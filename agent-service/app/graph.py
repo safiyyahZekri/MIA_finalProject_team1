@@ -22,7 +22,7 @@ Graph shape (real conditional branches, not a fixed chain):
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List, Literal, Optional, TypedDict
+from typing import Any, Dict, List, Literal, Optional, Tuple, TypedDict
 
 from langgraph.graph import StateGraph, START, END
 
@@ -85,6 +85,34 @@ def _top_evidence(hits: List[dict], n: int) -> List[dict]:
     ]
 
 
+def _citations(evidence: List[dict], indexes: List[int], fallback_n: int) -> Tuple[List[dict], bool]:
+    """Cite the passages the model says the answer was taken from.
+
+    Citing the top-ranked hits instead let a citation point at a document that
+    does not contain the answer: in the Opus 5 experiments every correct answer
+    with wrong citations had its figures in a lower-ranked chunk
+    (eval-service/EXPERIMENTS.md, finding 5). Indexes are 1-based, as numbered
+    in the extraction prompt; out-of-range and repeated ones are dropped.
+
+    Returns (citations, cited_by_model). When the model names no usable
+    passage the old top-ranked citation is used, and cited_by_model is False
+    so the fallback is counted rather than hidden.
+    """
+    picked: List[dict] = []
+    seen = set()
+    for index in indexes or []:
+        if isinstance(index, bool) or not isinstance(index, int) or not 1 <= index <= len(evidence):
+            continue
+        hit = evidence[index - 1]
+        key = (hit["document_id"], hit["page"], hit.get("section"))
+        if key not in seen:
+            seen.add(key)
+            picked.append(hit)
+    if picked:
+        return _top_evidence(picked, len(picked)), True
+    return _top_evidence(evidence, fallback_n), False
+
+
 def build_graph():
     llm = get_llm()
 
@@ -122,7 +150,12 @@ def build_graph():
             combined = _dedup_and_rank(combined, filter_hits)
 
         state["evidence"] = combined
-        _log(state, "retrieve", question_type=qtype, query=query, n_hits=len(combined))
+        _log(
+            state, "retrieve", question_type=qtype, query=query, n_hits=len(combined),
+            # What was retrieved, in rank order, so a citation can be checked
+            # against the evidence the model actually saw.
+            hits=[f"{h.get('document_id')}:p{h.get('page')}" for h in combined],
+        )
         return state
 
     async def grade_node(state: AgentState) -> AgentState:
@@ -152,6 +185,9 @@ def build_graph():
     async def reason_node(state: AgentState) -> AgentState:
         evidence = state.get("evidence", [])
         extraction = llm.extract(state["question"], state["question_type"], evidence)
+        # True when citations are the passages extraction named, False when
+        # they fell back to top-ranked hits, None when nothing was cited.
+        cited_by_model = None
 
         try:
             if isinstance(extraction, ExtractionCalculated):
@@ -168,24 +204,30 @@ def build_graph():
                     _log(state, "reason", shape="insufficient", cause="calculator_error")
                     return state
 
-                n = max(2, extraction.operand_count)
+                citations, cited_by_model = _citations(
+                    evidence, extraction.evidence_indexes, max(2, extraction.operand_count)
+                )
                 answer = {
                     "answer_type": "calculated",
-                    "evidence": _top_evidence(evidence, n) or _top_evidence(evidence, 1),
+                    "evidence": citations or _top_evidence(evidence, 1),
                     "params": {"value": round(value, 6), "formula": extraction.formula},
                 }
 
             elif isinstance(extraction, ExtractionDirect):
+                citations, cited_by_model = _citations(evidence, extraction.evidence_indexes, 1)
                 answer = {
                     "answer_type": "direct",
-                    "evidence": _top_evidence(evidence, 1),
+                    "evidence": citations,
                     "params": {"value": extraction.value},
                 }
 
             elif isinstance(extraction, ExtractionMultiSpan):
+                citations, cited_by_model = _citations(
+                    evidence, extraction.evidence_indexes, max(1, len(evidence))
+                )
                 answer = {
                     "answer_type": "multi_span",
-                    "evidence": _top_evidence(evidence, max(1, len(evidence))),
+                    "evidence": citations,
                     "params": {"values": extraction.values},
                 }
 
@@ -200,6 +242,7 @@ def build_graph():
             validate_answer_dict(answer)  # local schema self-check before returning
 
         except Exception as e:  # noqa: BLE001 - final safety net: never return a malformed/hallucinated answer
+            cited_by_model = None
             answer = {
                 "answer_type": "insufficient_evidence",
                 "evidence": [],
@@ -207,7 +250,7 @@ def build_graph():
             }
 
         state["answer"] = answer
-        _log_with_usage(state, "reason", llm, answer_type=answer["answer_type"])
+        _log_with_usage(state, "reason", llm, answer_type=answer["answer_type"], cited_by_model=cited_by_model)
         return state
 
     async def build_insufficient_node(state: AgentState) -> AgentState:
