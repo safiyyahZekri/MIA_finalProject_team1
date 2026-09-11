@@ -1,3 +1,5 @@
+import time
+
 import gradio as gr
 
 import api_client
@@ -28,6 +30,19 @@ def format_answer(result: dict) -> str:
     return body
 
 
+def answer_note(result: dict, seconds: float) -> str:
+    """How the answer was produced, so an answer-cache hit is visible."""
+    if result.get("cache_hit"):
+        match = (
+            "a reworded question" if result.get("cache_match") == "reworded" else "the same question"
+        )
+        return (
+            f"\n\n_Answered from the answer cache ({match} was asked before) "
+            f"in {seconds * 1000:.0f} ms, without running the agent._"
+        )
+    return f"\n\n_Answered by the agent in {seconds:.1f} s._"
+
+
 def chat_fn(message, history, document_id):
     doc_id = document_id.strip() or None
     try:
@@ -42,8 +57,9 @@ def answer_with_evidence(message, history, document_id):
     history = history or []
     doc_id = document_id.strip() or None
     try:
+        started = time.perf_counter()
         result = api_client.ask(message, doc_id)
-        answer = format_answer(result)
+        answer = format_answer(result) + answer_note(result, time.perf_counter() - started)
     except Exception as exc:
         answer = f"Request to orchestrator failed: {exc}"
         return (
@@ -166,7 +182,9 @@ def load_dashboard():
         f"**Detected tables:** {total_tables}  \n"
         f"**Human reviews:** {len(reviews)}"
     )
-    query_rows = [[q["question"], q["latency_ms"], q["valid"]] for q in queries]
+    query_rows = [
+        [q["question"], q["latency_ms"], q["valid"], q.get("cache") or ""] for q in queries
+    ]
     review_rows = [
         [
             review["review_id"],
@@ -415,7 +433,7 @@ with gr.Blocks(title="LEDGER") as demo:
 
     with gr.Tab("Dashboard"):
         stats_md = gr.Markdown()
-        query_table = gr.Dataframe(headers=["question", "latency_ms", "valid"])
+        query_table = gr.Dataframe(headers=["question", "latency_ms", "valid", "cache"])
         review_table = gr.Dataframe(
             headers=[
                 "review_id",
