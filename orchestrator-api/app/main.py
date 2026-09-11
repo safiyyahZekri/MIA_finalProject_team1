@@ -181,7 +181,10 @@ async def ask(request: AskRequest):
         evidence_boxes=await clients.evidence_boxes(answer["evidence"]),
     )
     # Only validated answers reach this point; a rejected one raised above.
-    if ASK_CACHE_ENABLED:
+    # A decline is not cached: the same question often answers on a retry, and
+    # a cached decline would keep returning "not enough evidence" until the
+    # cache is cleared.
+    if ASK_CACHE_ENABLED and response.answer_type != "insufficient_evidence":
         answer_cache.put(request.question, request.document_id, response)
     return response
 
