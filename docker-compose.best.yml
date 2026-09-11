@@ -1,0 +1,33 @@
+# The best measured configuration: 30/100 exact match, F1 0.402 on the 100
+# practice questions (run full100-g5-company, eval-service/REINDEX_EXPERIMENT.md).
+#
+# Use it explicitly, on top of the base file:
+#   docker compose -f docker-compose.yml -f docker-compose.best.yml up -d
+#
+# Plain `docker compose up` keeps every switch off: the measured baseline that
+# experiments start from. These switches reach 30/100 only over an index built
+# with contextual_text,company_metadata; on a legacy index they scored 26/100.
+services:
+  agent-service:
+    environment:
+      # Answer stage
+      ANSWER_FORMAT_FIXES: "true"
+      ANSWER_SHAPE_GUIDANCE: "true"
+      ANSWER_REPAIR: "true"
+      ANSWER_NORMALIZATION: "true"
+      # Retrieval and grading
+      HYBRID_RERANKING: "true"
+      RETRY_EVIDENCE_FUSION: "true"
+      ENTITY_DOCUMENT_ROUTING: "true"
+      ADAPTIVE_TOP_K: "true"
+      EVIDENCE_DIVERSIFICATION: "true"
+      QUERY_EXPANSION: "true"
+      TABLE_QUERY_REWRITING: "true"
+      ADJACENT_EVIDENCE: "true"
+      GRADE_COMPANY_CONTEXT: "true"
+      GRADE_REQUIRE_NAMED_TABLE: "true"
+      # Calculation
+      EXTRACT_GRADED_FIGURES: "true"
+      CALC_LIST_FALLBACK: "true"
+      # Company metadata shown to the grader (needs the company-metadata index)
+      EVIDENCE_COMPANY_LABEL: "true"
