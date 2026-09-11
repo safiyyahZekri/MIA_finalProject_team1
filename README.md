@@ -10,7 +10,7 @@ evidence is not there it says so instead of guessing.
 ## Quick start
 
 For someone who already has Docker running and the two index files from the
-team's shared drive (`ledger-index-company.tgz`, `ledger-source-pdfs.tgz`).
+[team's shared drive](https://drive.google.com/drive/folders/1_mP7CP3orWL5QyUMOhaAOol08TDqFyYy) (`ledger-index-company.tgz`, `ledger-source-pdfs.tgz`).
 Run these in Git Bash (Windows) or a terminal (macOS/Linux):
 
 ```bash
@@ -95,7 +95,7 @@ question returns "not enough evidence". Load an index before starting.
 
 ### Option A — the prepared index (recommended, a few seconds)
 
-1. Download these files from the team's shared drive into one folder:
+1. Download these files from the [team's shared drive](https://drive.google.com/drive/folders/1_mP7CP3orWL5QyUMOhaAOol08TDqFyYy) into one folder:
 
    | File | Contents |
    |---|---|
