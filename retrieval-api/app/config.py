@@ -21,6 +21,9 @@ class Settings:
     device: str = os.getenv("LEDGER_MODEL_DEVICE", "cpu")
     chunk_max_chars: int = int(os.getenv("LEDGER_CHUNK_MAX_CHARS", "1800"))
     chunk_overlap_blocks: int = int(os.getenv("LEDGER_CHUNK_OVERLAP_BLOCKS", "1"))
+    # Format for a new, empty index ("legacy" or switches from
+    # app/index_format.py). An existing index keeps the format in its manifest.
+    index_format: str = os.getenv("LEDGER_INDEX_FORMAT", "legacy")
     enable_reranker: bool = _as_bool(os.getenv("LEDGER_ENABLE_RERANKER", "true"))
     eval_service_url: str = os.getenv("EVAL_SERVICE_URL", "")
     tracing_timeout_seconds: float = float(

@@ -5,6 +5,7 @@ from fastapi import FastAPI, HTTPException, Request, status
 from .chunking import ChunkingConfig
 from .config import Settings
 from .engine import RetrievalEngine
+from .index_format import IndexFormat
 from .models import (
     BatchIndexRequest,
     BatchIndexResponse,
@@ -38,6 +39,7 @@ def build_default_engine(settings: Settings) -> RetrievalEngine:
             max_chars=settings.chunk_max_chars,
             overlap_blocks=settings.chunk_overlap_blocks,
         ),
+        index_format=IndexFormat.parse(settings.index_format),
     )
 
 
@@ -78,6 +80,7 @@ def create_app(
             "port": settings.port,
             "indexed_chunks": corpus.chunks,
             "tracing_enabled": request.app.state.tracer.enabled,
+            "index_format": request.app.state.engine.index_format.describe(),
         }
 
     @application.get("/stats", response_model=CorpusStats)

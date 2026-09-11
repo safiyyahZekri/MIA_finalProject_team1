@@ -9,6 +9,8 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_vali
 NonEmptyString = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 BBox = tuple[int, int, int, int]
 MetadataValue = str | int | float | bool | None
+# The section of every chunk that comes before the document's first heading.
+DEFAULT_SECTION = "Document"
 
 
 class WordData(BaseModel):
@@ -324,3 +326,5 @@ class CorpusStats(BaseModel):
     tables: int
     embedding_model: str
     reranker_model: str | None
+    # Switches the index was built with (app/index_format.py); empty is legacy.
+    index_format: list[str] = Field(default_factory=list)

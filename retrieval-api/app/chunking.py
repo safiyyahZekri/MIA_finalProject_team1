@@ -4,7 +4,19 @@ import hashlib
 import re
 from dataclasses import dataclass
 
-from .models import BBox, Cell, Chunk, DocumentBlock, IndexDocumentRequest
+from .company import detect_company
+from .index_format import LEGACY, IndexFormat
+from .models import (
+    DEFAULT_SECTION,
+    BBox,
+    Cell,
+    Chunk,
+    DocumentBlock,
+    IndexDocumentRequest,
+    MetadataValue,
+)
+from .tables import UNIT_PATTERN, first_row_title, table_grid
+from .tables import clean as _clean
 
 STRUCTURAL_HEADINGS = {
     "assets",
@@ -20,10 +32,6 @@ STRUCTURAL_HEADINGS = {
     "revenue",
     "results of operations",
 }
-UNIT_PATTERN = re.compile(
-    r"(?i)(?:amounts?\s+)?(?:in|expressed in)\s+"
-    r"(?:u\.s\.\s+)?(?:dollars?|thousands?|millions?|billions?|percent(?:ages?)?)"
-)
 YEAR_PATTERN = re.compile(r"^(?:19|20)\d{2}$")
 
 
@@ -89,10 +97,6 @@ def _chunk_id(
     return hashlib.sha256(identity.encode("utf-8")).hexdigest()[:32]
 
 
-def _clean(value: str) -> str:
-    return " ".join(value.split())
-
-
 def _infer_header_rows(cells: list[Cell], row_count: int) -> int:
     if row_count <= 1:
         return 1
@@ -113,42 +117,35 @@ def _infer_header_rows(cells: list[Cell], row_count: int) -> int:
     return 2 if has_hierarchy or second_row_is_period_header else 1
 
 
+def _table_units(context: str, rows: list[str]) -> str | None:
+    match = UNIT_PATTERN.search(f"{context} {' '.join(rows)}")
+    return match.group(0) if match else None
+
+
+def _header_row_count(cells: list[Cell], rows: list[str]) -> int:
+    if not cells:
+        return 1
+    return min(_infer_header_rows(cells, len(rows)), len(rows))
+
+
 def _serialize_table(block: DocumentBlock, context: str) -> SerializedTable:
     """Create deterministic span-aware text while retaining the original cells."""
     if not block.cells:
         raw = _clean(block.text)
-        units_match = UNIT_PATTERN.search(f"{context} {raw}")
+        rows = [raw] if raw else []
         return SerializedTable(
-            rows=[raw] if raw else [],
-            header_row_count=1,
-            units=units_match.group(0) if units_match else None,
+            rows=rows, header_row_count=1, units=_table_units(context, rows)
         )
-
-    row_count = max(cell.row_span[1] for cell in block.cells)
-    column_count = max(cell.col_span[1] for cell in block.cells)
-    grid: list[list[str]] = [["" for _ in range(column_count)] for _ in range(row_count)]
-    for cell in sorted(
-        block.cells,
-        key=lambda value: (value.row_span[0], value.col_span[0], value.row_span[1], value.col_span[1]),
-    ):
-        value = _clean(cell.text)
-        if not value:
-            continue
-        for row in range(cell.row_span[0], cell.row_span[1]):
-            for column in range(cell.col_span[0], cell.col_span[1]):
-                grid[row][column] = value
 
     rows = [
         f"Row {row_index + 1}: " + " | ".join(value or "[empty]" for value in row)
-        for row_index, row in enumerate(grid)
+        for row_index, row in enumerate(table_grid(block.cells))
         if any(row)
     ]
-    serialized = " ".join(rows)
-    units_match = UNIT_PATTERN.search(f"{context} {serialized}")
     return SerializedTable(
         rows=rows,
-        header_row_count=min(_infer_header_rows(block.cells, len(rows)), len(rows)),
-        units=units_match.group(0) if units_match else None,
+        header_row_count=_header_row_count(block.cells, rows),
+        units=_table_units(context, rows),
     )
 
 
@@ -177,6 +174,79 @@ def _table_parts(rows: list[str], header_row_count: int, max_chars: int) -> list
     return parts
 
 
+def _table_chunks(
+    *,
+    document_id: str,
+    source_doc_uid: str | None,
+    filename: str,
+    page: int,
+    section: str,
+    block_uuid: str,
+    bbox: BBox,
+    cells: list[Cell],
+    table: SerializedTable,
+    context: str,
+    metadata: dict[str, MetadataValue],
+    config: ChunkingConfig,
+    index_format: IndexFormat,
+) -> list[Chunk]:
+    """The chunks of one serialized table; shared by indexing and rebuilds."""
+    table_title = section if section != DEFAULT_SECTION else None
+    if index_format.table_titles:
+        table_title = first_row_title(cells) or table_title
+    prefix = []
+    if table_title:
+        prefix.append(f"Table: {table_title}")
+    if context:
+        prefix.append(f"Context: {context}")
+    if table.units:
+        prefix.append(f"Units: {table.units}")
+    parent_text = "\n".join([*prefix, *table.rows])
+    available_chars = max(100, config.max_chars - len("\n".join(prefix)))
+    table_parts = _table_parts(table.rows, table.header_row_count, available_chars)
+    chunks: list[Chunk] = []
+    for index, part in enumerate(table_parts):
+        text = "\n".join([*prefix, part])
+        identity_ids = [block_uuid]
+        if len(table_parts) > 1:
+            identity_ids = [f"{block_uuid}:part:{index + 1}"]
+        chunks.append(
+            Chunk(
+                chunk_id=_chunk_id(document_id, page, section, "table", identity_ids, text),
+                document_id=document_id,
+                source_doc_uid=source_doc_uid,
+                source_filename=filename,
+                page=page,
+                section=section,
+                content_type="table",
+                text=text,
+                parent_text=parent_text,
+                bbox=tuple(bbox),
+                source_block_ids=[block_uuid],
+                table_title=table_title,
+                table_context=context or None,
+                table_cells=cells,
+                metadata=metadata,
+            )
+        )
+    return chunks
+
+
+def apply_document_format(chunks: list[Chunk], index_format: IndexFormat) -> list[Chunk]:
+    """Document-level format steps, applied the same way at upload and rebuild."""
+    if not chunks or not index_format.company_metadata:
+        return chunks
+    metadata = chunks[0].metadata
+    supplied = metadata.get("company")
+    if isinstance(supplied, str) and supplied.strip():
+        return chunks
+    company = detect_company(chunks)
+    if company is None:
+        return chunks
+    enriched = {**metadata, "company": company}
+    return [chunk.model_copy(update={"metadata": enriched}) for chunk in chunks]
+
+
 def _flush_paragraphs(
     paragraph_group: list[DocumentBlock],
     section: str,
@@ -187,11 +257,15 @@ def _flush_paragraphs(
     return []
 
 
-def build_chunks(request: IndexDocumentRequest, config: ChunkingConfig) -> list[Chunk]:
+def build_chunks(
+    request: IndexDocumentRequest,
+    config: ChunkingConfig,
+    index_format: IndexFormat = LEGACY,
+) -> list[Chunk]:
     document = request.document
     filename = request.source_filename or document.document_id
     chunks: list[Chunk] = []
-    active_section = "Document"
+    active_section = DEFAULT_SECTION
 
     for page in sorted(document.pages, key=lambda item: item.page_number):
         paragraph_group: list[DocumentBlock] = []
@@ -208,50 +282,23 @@ def build_chunks(request: IndexDocumentRequest, config: ChunkingConfig) -> list[
                 table = _serialize_table(block, context)
                 if not table.rows:
                     continue
-                table_title = active_section if active_section != "Document" else None
-                prefix = []
-                if table_title:
-                    prefix.append(f"Table: {table_title}")
-                if context:
-                    prefix.append(f"Context: {context}")
-                if table.units:
-                    prefix.append(f"Units: {table.units}")
-                parent_text = "\n".join([*prefix, *table.rows])
-                available_chars = max(100, config.max_chars - len("\n".join(prefix)))
-                table_parts = _table_parts(
-                    table.rows, table.header_row_count, available_chars
-                )
-                for index, part in enumerate(table_parts):
-                    text = "\n".join([*prefix, part])
-                    identity_ids = [block.uuid]
-                    if len(table_parts) > 1:
-                        identity_ids = [f"{block.uuid}:part:{index + 1}"]
-                    chunks.append(
-                        Chunk(
-                            chunk_id=_chunk_id(
-                                document.document_id,
-                                page.page_number,
-                                active_section,
-                                "table",
-                                identity_ids,
-                                text,
-                            ),
-                            document_id=document.document_id,
-                            source_doc_uid=request.source_doc_uid,
-                            source_filename=filename,
-                            page=page.page_number,
-                            section=active_section,
-                            content_type="table",
-                            text=text,
-                            parent_text=parent_text,
-                            bbox=tuple(block.bbox),
-                            source_block_ids=[block.uuid],
-                            table_title=table_title,
-                            table_context=context or None,
-                            table_cells=block.cells,
-                            metadata=request.metadata,
-                        )
+                chunks.extend(
+                    _table_chunks(
+                        document_id=document.document_id,
+                        source_doc_uid=request.source_doc_uid,
+                        filename=filename,
+                        page=page.page_number,
+                        section=active_section,
+                        block_uuid=block.uuid,
+                        bbox=tuple(block.bbox),
+                        cells=block.cells,
+                        table=table,
+                        context=context,
+                        metadata=request.metadata,
+                        config=config,
+                        index_format=index_format,
                     )
+                )
                 continue
 
             if not clean_text:
@@ -302,4 +349,80 @@ def build_chunks(request: IndexDocumentRequest, config: ChunkingConfig) -> list[
                     metadata=request.metadata,
                 )
             )
-    return chunks
+    return apply_document_format(chunks, index_format)
+
+
+def _rebuild_table(first: Chunk, config: ChunkingConfig, index_format: IndexFormat) -> list[Chunk]:
+    """Re-cut one table from its first legacy chunk, as build_chunks() would."""
+    legacy_title = first.section if first.section != DEFAULT_SECTION else None
+    if first.table_title != legacy_title or len(first.source_block_ids) != 1:
+        raise ValueError(f"table chunk {first.chunk_id} was not built by the legacy format")
+    context = first.table_context or ""
+    head = "\n".join(
+        [
+            *([f"Table: {legacy_title}"] if legacy_title else []),
+            *([f"Context: {context}"] if context else []),
+        ]
+    )
+    if head and not first.parent_text.startswith(head + "\n"):
+        raise ValueError(f"table chunk {first.chunk_id}: parent_text does not start with its title and context")
+    lines = (first.parent_text[len(head) + 1 :] if head else first.parent_text).split("\n")
+    units = None
+    if lines[0].startswith("Units: "):
+        # A unit phrase can span the context's line break ("(in\nthousands)"),
+        # so the Units line can run over more than one line.
+        for count in range(1, len(lines)):
+            candidate = "\n".join(lines[:count])[len("Units: ") :]
+            if _table_units(context, lines[count:]) == candidate:
+                units, lines = candidate, lines[count:]
+                break
+    if not lines or _table_units(context, lines) != units:
+        raise ValueError(f"table chunk {first.chunk_id}: stored rows and units do not agree")
+    table = SerializedTable(
+        rows=lines,
+        header_row_count=_header_row_count(first.table_cells, lines),
+        units=units,
+    )
+    return _table_chunks(
+        document_id=first.document_id,
+        source_doc_uid=first.source_doc_uid,
+        filename=first.source_filename,
+        page=first.page,
+        section=first.section,
+        block_uuid=first.source_block_ids[0],
+        bbox=first.bbox,
+        cells=first.table_cells,
+        table=table,
+        context=context,
+        metadata=first.metadata,
+        config=config,
+        index_format=index_format,
+    )
+
+
+def rebuild_chunks(
+    chunks: list[Chunk], config: ChunkingConfig, index_format: IndexFormat
+) -> list[Chunk]:
+    """One document's chunks under another format, from its legacy chunks.
+
+    Every table chunk stores its whole serialized table, cells and context, and
+    paragraph chunks do not depend on the format, so this returns what
+    build_chunks() returns for the original document, with no OCR. Raises
+    ValueError when a stored chunk cannot be read back exactly.
+    """
+    if not chunks:
+        return []
+    if len({chunk.document_id for chunk in chunks}) != 1:
+        raise ValueError("rebuild_chunks takes the chunks of a single document")
+    rebuilt: list[Chunk] = []
+    tables_done: set[tuple[int, tuple[str, ...], str]] = set()
+    for chunk in chunks:
+        if chunk.content_type == "paragraph":
+            rebuilt.append(chunk)
+            continue
+        key = (chunk.page, tuple(chunk.source_block_ids), chunk.parent_text)
+        if key in tables_done:
+            continue
+        tables_done.add(key)
+        rebuilt.extend(_rebuild_table(chunk, config, index_format))
+    return apply_document_format(rebuilt, index_format)

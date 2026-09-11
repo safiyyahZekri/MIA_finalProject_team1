@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import re
@@ -17,6 +18,7 @@ import numpy as np
 from rank_bm25 import BM25Okapi
 
 from .chunking import ChunkingConfig, build_chunks
+from .index_format import LEGACY, IndexFormat, searchable_text
 from .models import (
     BatchIndexResponse,
     Chunk,
@@ -97,11 +99,15 @@ class RetrievalEngine:
         embedder: Embedder,
         reranker: Reranker | None,
         chunking: ChunkingConfig | None = None,
+        index_format: IndexFormat | None = None,
     ) -> None:
         self.data_dir = Path(data_dir)
         self.embedder = embedder
         self.reranker = reranker
         self.chunking = chunking or ChunkingConfig()
+        # The format a new, empty index gets; an existing index keeps its own.
+        self.configured_format = index_format or LEGACY
+        self.index_format = self.configured_format
         self._lock = threading.RLock()
         self._chunks: list[Chunk] = []
         self._vectors = np.empty((0, 0), dtype=np.float32)
@@ -153,14 +159,26 @@ class RetrievalEngine:
             self._vectors = np.load(self.vectors_path).astype(np.float32, copy=False)
             if len(self._chunks) != len(self._vectors):
                 raise RuntimeError("persisted chunks and vectors are inconsistent")
-            if self.manifest_path.exists():
-                manifest = json.loads(self.manifest_path.read_text(encoding="utf-8"))
-                stored_model = manifest.get("embedding_model")
-                if stored_model and stored_model != self.embedder.name:
-                    raise RuntimeError(
-                        "persisted index uses embedding model "
-                        f"{stored_model!r}, configured model is {self.embedder.name!r}"
-                    )
+            manifest = (
+                json.loads(self.manifest_path.read_text(encoding="utf-8"))
+                if self.manifest_path.exists()
+                else {}
+            )
+            stored_model = manifest.get("embedding_model")
+            if stored_model and stored_model != self.embedder.name:
+                raise RuntimeError(
+                    "persisted index uses embedding model "
+                    f"{stored_model!r}, configured model is {self.embedder.name!r}"
+                )
+            # Chunks and vectors were built in the index's own format, so the
+            # index is served and extended in it, whatever LEDGER_INDEX_FORMAT says.
+            self.index_format = IndexFormat.from_manifest(manifest.get("index_format"))
+            if self.index_format != self.configured_format:
+                logging.getLogger(__name__).warning(
+                    "serving the index in its own format %s, not the configured %s",
+                    self.index_format.describe(),
+                    self.configured_format.describe(),
+                )
             self._rebuild_indexes()
 
     def _rebuild_indexes(self) -> None:
@@ -172,15 +190,17 @@ class RetrievalEngine:
         index = faiss.IndexFlatIP(dimensions)
         index.add(np.ascontiguousarray(self._vectors, dtype=np.float32))
         self._faiss_index = index
-        tokenized = [tokenize(self._searchable_text(chunk)) for chunk in self._chunks]
+        tokenized = [tokenize(self._index_text(chunk)) for chunk in self._chunks]
         self._bm25 = BM25Okapi(tokenized)
+
+    def _index_text(self, chunk: Chunk) -> str:
+        """What this index embeds and BM25-indexes for a chunk."""
+        return searchable_text(chunk, self.index_format)
 
     @staticmethod
     def _searchable_text(chunk: Chunk) -> str:
-        metadata = " ".join(
-            str(value) for value in chunk.metadata.values() if value is not None
-        )
-        return f"{chunk.source_filename} {metadata} {chunk.section} {chunk.text}"
+        """The legacy format's indexed text, for scripts reading a legacy index."""
+        return searchable_text(chunk, LEGACY)
 
     def _persist(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)
@@ -202,6 +222,7 @@ class RetrievalEngine:
                     if self._vectors.ndim == 2 and self._vectors.size
                     else 0,
                     "chunks": len(self._chunks),
+                    "index_format": self.index_format.to_manifest(),
                 },
                 indent=2,
             ),
@@ -233,14 +254,14 @@ class RetrievalEngine:
 
         chunks_by_document: list[list[Chunk]] = []
         for request in requests:
-            chunks = build_chunks(request, self.chunking)
+            chunks = build_chunks(request, self.chunking, self.index_format)
             if not chunks:
                 raise ValueError(
                     f"document {request.document.document_id!r} produced no searchable chunks"
                 )
             chunks_by_document.append(chunks)
         new_chunks = [chunk for chunks in chunks_by_document for chunk in chunks]
-        searchable = [self._searchable_text(chunk) for chunk in new_chunks]
+        searchable = [self._index_text(chunk) for chunk in new_chunks]
         new_vectors = self.embedder.encode_documents(searchable)
         if new_vectors.ndim != 2 or len(new_vectors) != len(new_chunks):
             raise RuntimeError("embedder returned an invalid vector matrix")
@@ -405,7 +426,7 @@ class RetrievalEngine:
                 }
             )
             replacement = self.embedder.encode_documents(
-                [self._searchable_text(corrected)]
+                [self._index_text(corrected)]
             )
             if replacement.ndim != 2 or replacement.shape != (1, self._vectors.shape[1]):
                 raise RuntimeError("embedder returned an invalid correction vector")
@@ -484,7 +505,7 @@ class RetrievalEngine:
                 if max_positive > 0
                 else 0.0
             )
-            document_tokens = set(tokenize(self._searchable_text(self._chunks[index])))
+            document_tokens = set(tokenize(self._index_text(self._chunks[index])))
             coverage = (
                 len(query_tokens & document_tokens) / len(query_tokens)
                 if query_tokens
@@ -704,7 +725,7 @@ class RetrievalEngine:
             if did_rerank:
                 stage_started = time.perf_counter()
                 passages = [
-                    self._searchable_text(self._chunks[index]) for index in candidates
+                    self._index_text(self._chunks[index]) for index in candidates
                 ]
                 reranker_values = self.reranker.score(request.query, passages)
                 if len(reranker_values) != len(candidates):
@@ -792,4 +813,5 @@ class RetrievalEngine:
             tables=sum(document.tables for document in documents),
             embedding_model=self.embedder.name,
             reranker_model=self.reranker.name if self.reranker else None,
+            index_format=self.index_format.enabled(),
         )
