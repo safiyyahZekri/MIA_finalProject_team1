@@ -51,6 +51,9 @@ services:
       LEDGER_RETRIEVAL_PORT: "8002"
       LEDGER_RETRIEVAL_DATA_DIR: /data
       EVAL_SERVICE_URL: http://eval-service:8005
+      # Format for a new, empty index; an existing index keeps the one in its
+      # manifest (retrieval-api/app/index_format.py).
+      LEDGER_INDEX_FORMAT: ${LEDGER_INDEX_FORMAT:-legacy}
     volumes:
       - retrieval-data:/data
       - model-cache:/root/.cache/huggingface
@@ -119,6 +122,7 @@ services:
       RANK_FUSION_MERGE: ${RANK_FUSION_MERGE:-false}
       EXTRACT_GRADED_FIGURES: ${EXTRACT_GRADED_FIGURES:-false}
       CALC_LIST_FALLBACK: ${CALC_LIST_FALLBACK:-false}
+      EVIDENCE_COMPANY_LABEL: ${EVIDENCE_COMPANY_LABEL:-false}
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8003/health')"]
       interval: 10s

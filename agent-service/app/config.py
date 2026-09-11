@@ -177,6 +177,11 @@ class Settings:
     # '38.6, 23.6, 12.2', is re-extracted as a list answer instead of being
     # declined by the calculator (A086).
     CALC_LIST_FALLBACK: bool = _bool("CALC_LIST_FALLBACK", False)
+    # Label each evidence passage with the company its document names in its
+    # own page headers (retrieval-api index format company_metadata), so the
+    # grader can tie a page that never prints the company to it (A035, A022).
+    # Needs an index built with company metadata; otherwise it changes nothing.
+    EVIDENCE_COMPANY_LABEL: bool = _bool("EVIDENCE_COMPANY_LABEL", False)
     MIN_EVIDENCE_SCORE: float = float(os.getenv("MIN_EVIDENCE_SCORE", "0.35"))
 
     # --- Service ---

@@ -76,6 +76,7 @@ async def health():
                 "GRADE_MIN_CONFIDENCE",
                 "EXTRACT_GRADED_FIGURES",
                 "CALC_LIST_FALLBACK",
+                "EVIDENCE_COMPANY_LABEL",
             )
         }
     )

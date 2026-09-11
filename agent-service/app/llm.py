@@ -161,6 +161,11 @@ def evidence_source_label(evidence: dict, include_score: bool = False) -> str:
         parts.append(f"score={evidence.get('score')}")
     if evidence.get("routed_entity"):
         parts.append(f"verified_entity={evidence['routed_entity']}")
+    if settings.EVIDENCE_COMPANY_LABEL:
+        metadata = evidence.get("metadata") if isinstance(evidence.get("metadata"), dict) else {}
+        company = metadata.get("company")
+        if isinstance(company, str) and company.strip():
+            parts.append(f"company={' '.join(company.split())}")
     return " ".join(parts)
 
 

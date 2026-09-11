@@ -497,7 +497,7 @@ def build_graph():
                     },
                     "metadata": {
                         key: h["metadata"][key]
-                        for key in ("source_doc_uid", "original_filename")
+                        for key in ("source_doc_uid", "original_filename", "company")
                         if isinstance(h.get("metadata"), dict)
                         and h["metadata"].get(key) is not None
                     },
