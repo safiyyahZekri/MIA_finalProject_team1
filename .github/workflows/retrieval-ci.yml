@@ -1,0 +1,69 @@
+name: Retrieval CI
+
+on:
+  push:
+    paths:
+      - "retrieval-api/**"
+      - "doc-processor-api/**"
+      - "agent-service/**"
+      - "orchestrator-api/**"
+      - "eval-service/**"
+      - "answer-validator-api/**"
+      - "ui-service/**"
+      - "docker-compose.yml"
+      - ".github/workflows/retrieval-ci.yml"
+  pull_request:
+    paths:
+      - "retrieval-api/**"
+      - "doc-processor-api/**"
+      - "agent-service/**"
+      - "orchestrator-api/**"
+      - "eval-service/**"
+      - "answer-validator-api/**"
+      - "ui-service/**"
+      - "docker-compose.yml"
+
+jobs:
+  retrieval:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: retrieval-api
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements-ci.txt
+      - run: ruff check app tests
+      - run: python -m pytest -q
+
+  retrieval-integrations:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [agent-service, answer-validator-api, orchestrator-api, eval-service, ui-service]
+    defaults:
+      run:
+        working-directory: ${{ matrix.service }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements-dev.txt
+      - run: python -m pytest -q
+
+  compose-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker compose config --quiet
+      - name: Assert all seven services are included
+        run: |
+          test "$(docker compose config --services | wc -l)" -eq 7
+          for service in orchestrator-api doc-processor-api retrieval-api agent-service answer-validator-api eval-service ui-service; do
+            docker compose config --services | grep -Fx "$service"
+          done

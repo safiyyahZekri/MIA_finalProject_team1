@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+*.egg-info/
+.env
+results/*.json
+# Written on the host by scripts/run_answer_eval.py; `results/*.json` above
+# matches only files directly in results/, not this directory.
+results/answer-eval/
+results/*.csv

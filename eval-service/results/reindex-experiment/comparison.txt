@@ -1,0 +1,41 @@
+
+dense
+   index             recall_at_1    recall_at_5   recall_at_10            mrr
+   legacy (live)          0.1368         0.3421         0.3895         0.2213
+   contextual             0.1684         0.2684         0.3842         0.2293
+   +company               0.1789         0.3211         0.3895         0.2392
+   +titles                0.1789         0.3211         0.3895         0.2392
+
+bm25
+   index             recall_at_1    recall_at_5   recall_at_10            mrr
+   legacy (live)          0.2526         0.4684         0.5211         0.3562
+   contextual             0.3053         0.5105         0.5632         0.3918
+   +company               0.3316         0.5263         0.5895         0.4413
+   +titles                0.3316         0.5263         0.5895         0.4378
+
+hybrid
+   index             recall_at_1    recall_at_5   recall_at_10            mrr
+   legacy (live)          0.2053         0.4211         0.4421         0.3044
+   contextual             0.1737         0.3737         0.4158         0.2637
+   +company               0.2421         0.4526         0.4895         0.3468
+   +titles                0.2421         0.4526         0.4895         0.3465
+
+hybrid_reranker
+   index             recall_at_1    recall_at_5   recall_at_10            mrr
+   legacy (live)          0.2421         0.4105         0.4947         0.3235
+   contextual             0.2105         0.4737         0.5263         0.3129
+   +company               0.3105         0.5526         0.5842         0.4204
+   +titles                0.3105         0.5526         0.5842         0.4202
+
+dense           recall@5 legacy (live) -> contextual: gained 5 ['A042', 'A046', 'A048', 'A062', 'A076']  lost 12 ['A006', 'A011', 'A018', 'A025', 'A031', 'A045', 'A052', 'A067', 'A078', 'A079', 'A080', 'A097']
+dense           recall@5 contextual -> +company: gained 8 ['A010', 'A022', 'A025', 'A040', 'A078', 'A080', 'A089', 'A093']  lost 3 ['A014', 'A073', 'A087']
+dense           recall@5 +company -> +titles: gained 0 []  lost 0 []
+bm25            recall@5 legacy (live) -> contextual: gained 6 ['A029', 'A030', 'A035', 'A037', 'A085', 'A087']  lost 2 ['A052', 'A073']
+bm25            recall@5 contextual -> +company: gained 7 ['A001', 'A010', 'A014', 'A022', 'A076', 'A089', 'A100']  lost 5 ['A029', 'A030', 'A059', 'A077', 'A087']
+bm25            recall@5 +company -> +titles: gained 0 []  lost 0 []
+hybrid          recall@5 legacy (live) -> contextual: gained 1 ['A075']  lost 6 ['A013', 'A018', 'A052', 'A054', 'A069', 'A079']
+hybrid          recall@5 contextual -> +company: gained 11 ['A001', 'A010', 'A021', 'A022', 'A026', 'A040', 'A058', 'A072', 'A076', 'A089', 'A100']  lost 2 ['A006', 'A097']
+hybrid          recall@5 +company -> +titles: gained 0 []  lost 0 []
+hybrid_reranker recall@5 legacy (live) -> contextual: gained 10 ['A016', 'A026', 'A029', 'A035', 'A040', 'A048', 'A073', 'A075', 'A094', 'A097']  lost 3 ['A043', 'A052', 'A086']
+hybrid_reranker recall@5 contextual -> +company: gained 10 ['A001', 'A010', 'A021', 'A022', 'A058', 'A072', 'A076', 'A089', 'A090', 'A100']  lost 2 ['A088', 'A097']
+hybrid_reranker recall@5 +company -> +titles: gained 0 []  lost 0 []

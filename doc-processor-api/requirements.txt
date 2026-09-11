@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+python-multipart
+pymupdf
+python-doctr
+numpy
+pydantic
+img2table
+
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.14.0

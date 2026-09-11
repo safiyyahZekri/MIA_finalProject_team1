@@ -1,0 +1,185 @@
+services:
+  orchestrator-api:
+    build: ./orchestrator-api
+    ports:
+      - "8000:8000"
+    environment:
+      MOCK_MODE: "false"
+      DOC_PROCESSOR_URL: http://doc-processor-api:8001
+      RETRIEVAL_SERVICE_URL: http://retrieval-api:8002
+      AGENT_SERVICE_URL: http://agent-service:8003
+      VALIDATOR_SERVICE_URL: http://answer-validator-api:8004
+      DOCUMENT_STORE_DIR: /data/documents
+      REVIEW_STORE_PATH: /data/documents/reviews.jsonl
+      ASK_CACHE_ENABLED: ${ASK_CACHE_ENABLED:-true}
+      ASK_CACHE_MAX_ENTRIES: ${ASK_CACHE_MAX_ENTRIES:-500}
+      AGENT_TIMEOUT_SECONDS: ${AGENT_TIMEOUT_SECONDS:-600}
+    volumes:
+      - source-documents:/data/documents
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    depends_on:
+      doc-processor-api:
+        condition: service_healthy
+      retrieval-api:
+        condition: service_healthy
+      agent-service:
+        condition: service_healthy
+      answer-validator-api:
+        condition: service_healthy
+
+  doc-processor-api:
+    build: ./doc-processor-api
+    ports:
+      - "8001:8001"
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 300s
+
+  retrieval-api:
+    build: ./retrieval-api
+    ports:
+      - "8002:8002"
+    environment:
+      LEDGER_RETRIEVAL_PORT: "8002"
+      LEDGER_RETRIEVAL_DATA_DIR: /data
+      EVAL_SERVICE_URL: http://eval-service:8005
+      # Format for a new, empty index; an existing index keeps the one in its
+      # manifest (retrieval-api/app/index_format.py).
+      LEDGER_INDEX_FORMAT: ${LEDGER_INDEX_FORMAT:-legacy}
+    volumes:
+      - retrieval-data:/data
+      - model-cache:/root/.cache/huggingface
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8002/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 180s
+    depends_on:
+      eval-service:
+        condition: service_healthy
+
+  agent-service:
+    build: ./agent-service
+    ports:
+      - "8003:8003"
+    environment:
+      # Defaults keep the stack runnable with no .env. A local .env next to
+      # this file (gitignored) switches on the real model and supplies keys.
+      LLM_PROVIDER: ${LLM_PROVIDER:-mock}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-opus-5}
+      ANTHROPIC_MAX_RETRIES: ${ANTHROPIC_MAX_RETRIES:-8}
+      ANTHROPIC_MAX_TOKENS: ${ANTHROPIC_MAX_TOKENS:-16000}
+      ANTHROPIC_EFFORT: ${ANTHROPIC_EFFORT:-}
+      # No colon: an explicitly empty value disables fallbacks.
+      ANTHROPIC_FALLBACKS: ${ANTHROPIC_FALLBACKS-default}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_API_KEYS: ${GEMINI_API_KEYS:-}
+      GEMINI_EXHAUSTED_KEY_RETRY_S: ${GEMINI_EXHAUSTED_KEY_RETRY_S:-3600}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
+      GEMINI_MAX_OUTPUT_TOKENS: ${GEMINI_MAX_OUTPUT_TOKENS:-16000}
+      GEMINI_TEMPERATURE: ${GEMINI_TEMPERATURE:-}
+      GEMINI_MAX_ATTEMPTS: ${GEMINI_MAX_ATTEMPTS:-8}
+      GEMINI_INPUT_USD_PER_MTOK: ${GEMINI_INPUT_USD_PER_MTOK:-0}
+      GEMINI_OUTPUT_USD_PER_MTOK: ${GEMINI_OUTPUT_USD_PER_MTOK:-0}
+      RETRIEVAL_API_URL: ${RETRIEVAL_API_URL:-http://retrieval-api:8002}
+      RETRIEVAL_FALLBACK_TO_MOCK: "false"
+      TOP_K_FINAL: ${TOP_K_FINAL:-5}
+      QUERY_DECOMPOSITION: ${QUERY_DECOMPOSITION:-false}
+      HYBRID_RERANKING: ${HYBRID_RERANKING:-false}
+      ENTITY_DOCUMENT_ROUTING: ${ENTITY_DOCUMENT_ROUTING:-false}
+      ENTITY_ROUTING_CANDIDATES: ${ENTITY_ROUTING_CANDIDATES:-5}
+      ANSWER_SHAPE_GUIDANCE: ${ANSWER_SHAPE_GUIDANCE:-false}
+      RETRY_EVIDENCE_FUSION: ${RETRY_EVIDENCE_FUSION:-false}
+      RETRY_FUSION_MAX_HITS: ${RETRY_FUSION_MAX_HITS:-10}
+      GRADE_REQUIRE_ENTITY_MATCH: ${GRADE_REQUIRE_ENTITY_MATCH:-true}
+      ADAPTIVE_TOP_K: ${ADAPTIVE_TOP_K:-false}
+      ADAPTIVE_TOP_K_MAX: ${ADAPTIVE_TOP_K_MAX:-15}
+      EVIDENCE_DIVERSIFICATION: ${EVIDENCE_DIVERSIFICATION:-false}
+      QUERY_EXPANSION: ${QUERY_EXPANSION:-false}
+      TABLE_QUERY_REWRITING: ${TABLE_QUERY_REWRITING:-false}
+      ADJACENT_EVIDENCE: ${ADJACENT_EVIDENCE:-false}
+      ANSWER_REPAIR: ${ANSWER_REPAIR:-false}
+      ANSWER_NORMALIZATION: ${ANSWER_NORMALIZATION:-false}
+      QUESTION_TYPE_RETRIEVAL: ${QUESTION_TYPE_RETRIEVAL:-false}
+      RETRIEVAL_PROFILES_JSON: '${RETRIEVAL_PROFILES_JSON:-{}}'
+      GRADE_CALIBRATION: ${GRADE_CALIBRATION:-false}
+      GRADE_MIN_SCORE: ${GRADE_MIN_SCORE:-0}
+      GRADE_MIN_CONFIDENCE: ${GRADE_MIN_CONFIDENCE:-0}
+      # Enhancement switches, each off unless set (agent-service/app/config.py).
+      ANSWER_FORMAT_FIXES: ${ANSWER_FORMAT_FIXES:-false}
+      GRADE_COMPANY_CONTEXT: ${GRADE_COMPANY_CONTEXT:-false}
+      GRADE_REQUIRE_NAMED_TABLE: ${GRADE_REQUIRE_NAMED_TABLE:-false}
+      RANK_FUSION_MERGE: ${RANK_FUSION_MERGE:-false}
+      EXTRACT_GRADED_FIGURES: ${EXTRACT_GRADED_FIGURES:-false}
+      CALC_LIST_FALLBACK: ${CALC_LIST_FALLBACK:-false}
+      EVIDENCE_COMPANY_LABEL: ${EVIDENCE_COMPANY_LABEL:-false}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8003/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    depends_on:
+      retrieval-api:
+        condition: service_healthy
+
+  answer-validator-api:
+    build: ./answer-validator-api
+    ports:
+      - "8004:8004"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8004/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  eval-service:
+    build: ./eval-service
+    ports:
+      - "8005:8005"
+    environment:
+      # Empty keys leave tracing local-only, exactly as before.
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+      # Langfuse's setup snippet names this LANGFUSE_BASE_URL; accept either.
+      LANGFUSE_HOST: ${LANGFUSE_HOST:-${LANGFUSE_BASE_URL:-https://cloud.langfuse.com}}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8005/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  ui-service:
+    build: ./ui-service
+    ports:
+      - "7860:7860"
+    environment:
+      ORCHESTRATOR_URL: http://orchestrator-api:8000
+      MOCK_MODE: "false"
+      ASK_TIMEOUT_SECONDS: ${ASK_TIMEOUT_SECONDS:-660}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:7860/')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    depends_on:
+      orchestrator-api:
+        condition: service_healthy
+
+volumes:
+  retrieval-data:
+  model-cache:
+  source-documents:
